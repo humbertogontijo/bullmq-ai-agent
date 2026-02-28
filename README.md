@@ -124,7 +124,6 @@ const worker = new AgentWorker({
     apiKey: process.env.OPENAI_API_KEY,
   }),
   goals: [flightGoal],
-  showConfirmation: true, // require user approval before tool execution
 });
 
 await worker.start();
@@ -144,7 +143,7 @@ const sessionId = 'user-123';
 // Send a prompt
 let result = await client.sendPrompt(sessionId, 'Find flights from SFO to JFK on March 15');
 
-// If the agent wants to call a tool and showConfirmation is enabled
+// If the agent wants to call a tool (confirmation is always required)
 if (result.status === 'awaiting-confirm') {
   // Inspect result.toolCalls, then approve:
   result = await client.confirm(sessionId);
@@ -187,7 +186,6 @@ new AgentWorker(options: AgentWorkerOptions)
 | `connection`        | `ConnectionOptions` | Redis connection (from BullMQ)                                    |
 | `llmConfig`        | `(options) => Promise<AgentWorkerLlmConfigData>` | Called each step; return config for `initChatModel` (model, apiKey, etc.) |
 | `goals`             | `AgentGoal[]`       | One or more agent goals with tools                                |
-| `showConfirmation`  | `boolean?`          | Require user confirmation before tool execution (default: `true`) |
 
 
 **Methods:**
@@ -212,8 +210,8 @@ new AgentClient(options: AgentClientOptions)
 
 **Methods:**
 
-- `sendPrompt(sessionId, prompt): Promise<StepResult>` — Send a user message
-- `confirm(sessionId): Promise<StepResult>` — Approve pending tool calls
+- `sendPrompt(sessionId, prompt, options?): Promise<StepResult>` — Send a user message. Options: `goalId`, `context`, `initialMessages`, `priority`, `toolChoice`, `autoExecuteTools` (when `true`, tools run automatically; when omitted or false, user confirmation is required).
+- `confirm(sessionId, context?): Promise<StepResult>` — Approve pending tool calls
 - `endChat(sessionId): Promise<StepResult>` — End the conversation
 - `getConversationHistory(sessionId): Promise<SerializedMessage[]>` — Get full history
 - `close(): Promise<void>` — Close client connections

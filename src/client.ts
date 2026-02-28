@@ -63,6 +63,8 @@ export class AgentClient {
       priority?: number;
       /** Enforce a tool choice for this step (e.g. tool name, "auto", "any", "none"). */
       toolChoice?: string | Record<string, unknown> | 'auto' | 'any' | 'none';
+      /** When true, tools run automatically without confirmation. When omitted or false, user confirmation is required. */
+      autoExecuteTools?: boolean;
     },
   ): Promise<StepResult> {
     const job = await this.addOrchestratorJob(sessionId, {

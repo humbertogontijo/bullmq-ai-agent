@@ -133,7 +133,6 @@ export class AgentWorker {
   private readonly connection: ConnectionOptions;
   private readonly llmConfig: AgentWorkerLlmConfig;
   private readonly goals: Map<string, AgentGoal>;
-  private readonly showConfirmation: boolean;
   private readonly multiGoalMode: boolean;
   private readonly queuePrefix: string;
   private readonly logger?: AgentWorkerLogger;
@@ -147,8 +146,13 @@ export class AgentWorker {
 
   constructor(options: AgentWorkerOptions) {
     this.connection = options.connection;
+    if (options.llmConfig == null || typeof options.llmConfig !== 'function') {
+      throw new Error(
+        'AgentWorker requires llmConfig: a function (options) => Promise<{ model: string; ... }>. ' +
+        'It is used to supply LLM settings for each step (e.g. model, apiKey).',
+      );
+    }
     this.llmConfig = options.llmConfig;
-    this.showConfirmation = options.showConfirmation ?? true;
     this.goals = new Map(options.goals.map((g) => [g.id, g]));
     this.multiGoalMode = options.goals.length > 1;
     this.queuePrefix = options.queuePrefix ?? '';
@@ -170,15 +174,15 @@ export class AgentWorker {
 
     const withErrorLog =
       <T, R>(workerName: string, fn: (job: Job<T>) => Promise<R>) =>
-      async (job: Job<T>): Promise<R> => {
-        try {
-          return await fn(job);
-        } catch (err) {
-          const msg = `[${workerName}] Job ${job.id} failed: ${err instanceof Error ? err.stack : err}`;
-          this.logger?.error(msg, err instanceof Error ? err : undefined);
-          throw err;
-        }
-      };
+        async (job: Job<T>): Promise<R> => {
+          try {
+            return await fn(job);
+          } catch (err) {
+            const msg = `[${workerName}] Job ${job.id} failed: ${err instanceof Error ? err.stack : err}`;
+            this.logger?.error(msg, err instanceof Error ? err : undefined);
+            throw err;
+          }
+        };
 
     this.orchestratorWorker = new Worker<OrchestratorJobData>(
       orchQueue,
@@ -222,13 +226,20 @@ export class AgentWorker {
       goalId: jobContext?.goalId,
       context: jobContext?.context,
     });
-    const { model, modelProvider, apiKey, ...rest } = config;
 
-    const llm = await initChatModel(model, {
-      ...(modelProvider ? { modelProvider } : {}),
-      ...(apiKey ? { apiKey } : {}),
-      ...rest,
-    });
+    let llm: ConfigurableModel;
+    try {
+      const { model, modelProvider, apiKey, ...rest } = config;
+      llm = await initChatModel(model, {
+        ...(modelProvider ? { modelProvider } : {}),
+        ...(apiKey ? { apiKey } : {}),
+        ...rest,
+      });
+    } catch (err) {
+      throw new Error(
+        `Failed to create model for config "${JSON.stringify(config)}": ${err}`,
+      );
+    }
     return tools ? llm.bindTools(tools) : llm;
   }
 
@@ -258,19 +269,19 @@ export class AgentWorker {
     // Single-goal mode, or explicit goalId (run as single-goal so history stays in orchestrator)
     if (!this.multiGoalMode || job.data.goalId) {
       const singleGoalId =
-      job.data.goalId ?? prevState?.goalId ?? [...this.goals.keys()][0];
+        job.data.goalId ?? prevState?.goalId ?? [...this.goals.keys()][0];
       return this.processSingleGoalStep(job, singleGoalId, type, prompt, prevState);
     }
 
     // Multi-goal mode (routing, no explicit goalId)
     if (type === 'prompt') {
       const agentIds = await this.routeToAgents(
-            prompt ?? '',
-            prevState?.agentResults
-              ? deriveRoutingHistory(prevState.agentResults)
-              : prevState?.history ?? [],
-            job.data.context,
-          );
+        prompt ?? '',
+        prevState?.agentResults
+          ? deriveRoutingHistory(prevState.agentResults)
+          : prevState?.history ?? [],
+        job.data.context,
+      );
       const routingJobId = await this.createAgentFlow(
         job,
         agentIds,
@@ -308,7 +319,7 @@ export class AgentWorker {
   private async processAgent(
     job: Job<AgentChildJobData>,
   ): Promise<AgentChildResult> {
-    const { sessionId, goalId, prompt, toolCalls, context, initialMessages, toolChoice } =
+    const { sessionId, goalId, prompt, toolCalls, context, initialMessages, toolChoice, autoExecuteTools } =
       job.data;
     const goal = this.goals.get(goalId);
     if (!goal) {
@@ -380,7 +391,15 @@ export class AgentWorker {
       return { goalId: goal.id, messages: [], status: 'complete' };
     }
 
-    return this.runAgentLoop(goal, model, messages, restoredCount, context, toolChoice);
+    return this.runAgentLoop(
+      goal,
+      model,
+      messages,
+      restoredCount,
+      context,
+      toolChoice,
+      autoExecuteTools === true,
+    );
   }
 
   /**
@@ -396,6 +415,7 @@ export class AgentWorker {
     restoredCount: number,
     context?: Record<string, unknown>,
     toolChoice?: string | Record<string, unknown> | 'auto' | 'any' | 'none',
+    autoExecuteTools = false,
     maxRounds = 5,
   ): Promise<AgentChildResult> {
     let rounds = 0;
@@ -414,7 +434,7 @@ export class AgentWorker {
         };
       }
 
-      if (this.showConfirmation) {
+      if (!autoExecuteTools) {
         return {
           goalId: goal.id,
           messages: serializeMessages(messages.slice(restoredCount)),
@@ -505,7 +525,7 @@ export class AgentWorker {
       return { history: [], goalId, status: 'active' };
     }
 
-    const { sessionId, context, initialMessages, toolChoice } = job.data;
+    const { sessionId, context, initialMessages, toolChoice, autoExecuteTools } = job.data;
     const model = await this.createLLM(toToolDefinitions(goal.tools), {
       goalId,
       context,
@@ -578,6 +598,7 @@ export class AgentWorker {
       restoredCount,
       context,
       toolChoice,
+      autoExecuteTools === true,
     );
     const isAwaiting = result.status === 'awaiting-confirm';
 
@@ -634,7 +655,7 @@ export class AgentWorker {
     agentIds: string[],
     prompt: string,
   ): Promise<string> {
-    const { sessionId, context, initialMessages, toolChoice } = orchestratorJob.data;
+    const { sessionId, context, initialMessages, toolChoice, autoExecuteTools } = orchestratorJob.data;
     const ts = Date.now();
     const aggregatorJobId = `${sessionId}/${ts}`;
     const { removeOnComplete, removeOnFail } = orchestratorJob.opts;
@@ -660,6 +681,7 @@ export class AgentWorker {
           ...(context !== undefined && { context }),
           ...(initialMessages !== undefined && { initialMessages }),
           ...(toolChoice !== undefined && { toolChoice }),
+          ...(autoExecuteTools !== undefined && { autoExecuteTools }),
         } satisfies AgentChildJobData,
         opts: {
           jobId: `${sessionId}/${ts}/${goalId}`,

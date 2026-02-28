@@ -74,6 +74,11 @@ export interface OrchestratorJobData {
    * Lets the caller enforce a specific tool when needed.
    */
   toolChoice?: string | Record<string, unknown> | 'auto' | 'any' | 'none';
+  /**
+   * When true, tools are executed automatically when the LLM requests them.
+   * When omitted or false, user confirmation is required before executing tools.
+   */
+  autoExecuteTools?: boolean;
 }
 
 /** Data for per-agent child jobs (created by the orchestrator worker). */
@@ -89,6 +94,8 @@ export interface AgentChildJobData {
   context?: Record<string, unknown>;
   /** Optional tool choice (passed from orchestrator job when present). */
   toolChoice?: string | Record<string, unknown> | 'auto' | 'any' | 'none';
+  /** When true, execute tools automatically; when omitted or false, require user confirmation. */
+  autoExecuteTools?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -188,8 +195,6 @@ export interface AgentWorkerOptions {
    */
   llmConfig: AgentWorkerLlmConfig;
   goals: AgentGoal[];
-  /** Require user confirmation before executing tools. Default `true`. */
-  showConfirmation?: boolean;
 }
 
 export interface AgentClientOptions {

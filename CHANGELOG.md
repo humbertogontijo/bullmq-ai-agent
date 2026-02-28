@@ -13,7 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - LLM-powered routing for multi-agent mode (automatic dispatch to relevant agents)
 - Parallel agent execution with aggregator for multi-agent results
 - Persistent sessions — conversations survive process restarts
-- Tool confirmation flow with `showConfirmation` option
+- Tool confirmation flow with `autoExecuteTools` option
 - TypeBox-based type-safe tool definitions
 - Provider-agnostic LLM support via LangChain's `initChatModel`
 - Redis-backed state using ZSCAN + pipelined HGET for efficient history reconstruction

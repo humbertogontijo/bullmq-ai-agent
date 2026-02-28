@@ -47,7 +47,6 @@ async function main() {
     connection: REDIS,
     llmConfig: async () => ({ model: 'openai:gpt-4o', apiKey }),
     goals: [flightGoal, hrGoal],
-    showConfirmation: true,
   });
 
   const client = new AgentClient({ connection: REDIS });
@@ -67,7 +66,7 @@ async function main() {
     if (input === null) break;
     if (input === '') continue;
 
-    let result = await client.sendPrompt(sessionId, input);
+    let result = await client.sendPrompt(sessionId, input, { autoExecuteTools: true });
     printResult(result);
 
     while (result.status === 'awaiting-confirm') {
