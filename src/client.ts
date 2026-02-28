@@ -15,6 +15,7 @@ import type {
 import {
   AGGREGATOR_QUEUE,
   DEFAULT_JOB_RETENTION,
+  getQueueName,
   ORCHESTRATOR_QUEUE,
 } from './types.js';
 
@@ -31,35 +32,55 @@ export class AgentClient {
     this.connection = options.connection;
     this.retention = { ...DEFAULT_JOB_RETENTION, ...options.jobRetention };
     this.keepResult = { age: this.retention.age, count: this.retention.count };
-    this.orchestratorQueue = new Queue(ORCHESTRATOR_QUEUE, {
+    const prefix = options.queuePrefix;
+    const orchQueue = getQueueName(prefix, ORCHESTRATOR_QUEUE);
+    const aggQueue = getQueueName(prefix, AGGREGATOR_QUEUE);
+    this.orchestratorQueue = new Queue(orchQueue, {
       connection: this.connection,
     });
-    this.aggregatorQueue = new Queue(AGGREGATOR_QUEUE, {
+    this.aggregatorQueue = new Queue(aggQueue, {
       connection: this.connection,
     });
-    this.orchestratorEvents = new QueueEvents(ORCHESTRATOR_QUEUE, {
+    this.orchestratorEvents = new QueueEvents(orchQueue, {
       connection: this.connection,
     });
-    this.aggregatorEvents = new QueueEvents(AGGREGATOR_QUEUE, {
+    this.aggregatorEvents = new QueueEvents(aggQueue, {
       connection: this.connection,
     });
   }
 
-  async sendPrompt(sessionId: string, prompt: string): Promise<StepResult> {
+  async sendPrompt(
+    sessionId: string,
+    prompt: string,
+    context?: Record<string, unknown>,
+  ): Promise<StepResult> {
     const job = await this.addOrchestratorJob(sessionId, {
       type: 'prompt',
       prompt,
+      context,
     });
     return this.resolveResult(job);
   }
 
-  async confirm(sessionId: string): Promise<StepResult> {
-    const job = await this.addOrchestratorJob(sessionId, { type: 'confirm' });
+  async confirm(
+    sessionId: string,
+    context?: Record<string, unknown>,
+  ): Promise<StepResult> {
+    const job = await this.addOrchestratorJob(sessionId, {
+      type: 'confirm',
+      context,
+    });
     return this.resolveResult(job);
   }
 
-  async endChat(sessionId: string): Promise<StepResult> {
-    const job = await this.addOrchestratorJob(sessionId, { type: 'end-chat' });
+  async endChat(
+    sessionId: string,
+    context?: Record<string, unknown>,
+  ): Promise<StepResult> {
+    const job = await this.addOrchestratorJob(sessionId, {
+      type: 'end-chat',
+      context,
+    });
     return this.resolveResult(job);
   }
 
@@ -99,7 +120,11 @@ export class AgentClient {
 
   private async addOrchestratorJob(
     sessionId: string,
-    extra: { type: OrchestratorJobData['type']; prompt?: string },
+    extra: {
+      type: OrchestratorJobData['type'];
+      prompt?: string;
+      context?: Record<string, unknown>;
+    },
   ): Promise<Job> {
     return this.orchestratorQueue.add(
       'orchestrator-step',

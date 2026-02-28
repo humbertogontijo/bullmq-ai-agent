@@ -31,6 +31,7 @@ import {
   ORCHESTRATOR_QUEUE,
   AGENT_QUEUE,
   AGGREGATOR_QUEUE,
+  getQueueName,
 } from './types.js';
 import {
   fetchSessionResults,
@@ -132,6 +133,8 @@ export class AgentWorker {
   private readonly goals: Map<string, AgentGoal>;
   private readonly showConfirmation: boolean;
   private readonly multiGoalMode: boolean;
+  private readonly queuePrefix: string;
+  private readonly logger: AgentWorkerOptions['logger'];
 
   private orchestratorWorker!: Worker;
   private agentWorkerInstance!: Worker;
@@ -146,14 +149,20 @@ export class AgentWorker {
     this.showConfirmation = options.showConfirmation ?? true;
     this.goals = new Map(options.goals.map((g) => [g.id, g]));
     this.multiGoalMode = options.goals.length > 1;
+    this.queuePrefix = options.queuePrefix ?? '';
+    this.logger = options.logger;
   }
 
   async start(): Promise<void> {
+    const orchQueue = getQueueName(this.queuePrefix, ORCHESTRATOR_QUEUE);
+    const agentQueue = getQueueName(this.queuePrefix, AGENT_QUEUE);
+    const aggQueue = getQueueName(this.queuePrefix, AGGREGATOR_QUEUE);
+
     this.flowProducer = new FlowProducer({ connection: this.connection });
-    this.orchestratorQueue = new Queue(ORCHESTRATOR_QUEUE, {
+    this.orchestratorQueue = new Queue(orchQueue, {
       connection: this.connection,
     });
-    this.aggregatorQueue = new Queue(AGGREGATOR_QUEUE, {
+    this.aggregatorQueue = new Queue(aggQueue, {
       connection: this.connection,
     });
 
@@ -163,28 +172,26 @@ export class AgentWorker {
         try {
           return await fn(job);
         } catch (err) {
-          console.error(
-            `[${workerName}] Job ${job.id} failed:`,
-            err instanceof Error ? err.stack : err,
-          );
+          const msg = `[${workerName}] Job ${job.id} failed: ${err instanceof Error ? err.stack : err}`;
+          this.logger?.error(msg, err instanceof Error ? err : undefined);
           throw err;
         }
       };
 
     this.orchestratorWorker = new Worker<OrchestratorJobData>(
-      ORCHESTRATOR_QUEUE,
+      orchQueue,
       withErrorLog('orchestrator', (job) => this.processOrchestrator(job)),
       { connection: this.connection },
     );
 
     this.agentWorkerInstance = new Worker<AgentChildJobData>(
-      AGENT_QUEUE,
+      agentQueue,
       withErrorLog('agent', (job) => this.processAgent(job)),
       { connection: this.connection },
     );
 
     this.aggregatorWorker = new Worker(
-      AGGREGATOR_QUEUE,
+      aggQueue,
       withErrorLog('aggregator', (job) => this.processAggregator(job)),
       { connection: this.connection },
     );
@@ -282,7 +289,7 @@ export class AgentWorker {
   private async processAgent(
     job: Job<AgentChildJobData>,
   ): Promise<AgentChildResult> {
-    const { sessionId, goalId, prompt, toolCalls } = job.data;
+    const { sessionId, goalId, prompt, toolCalls, context } = job.data;
     const goal = this.goals.get(goalId);
     if (!goal) {
       return { goalId, messages: [], status: 'complete' };
@@ -315,7 +322,7 @@ export class AgentWorker {
           continue;
         }
         try {
-          const result = await handler.handler(tc.args);
+          const result = await handler.handler(tc.args, context);
           messages.push(
             new ToolMessage({
               content: JSON.stringify(result),
@@ -339,7 +346,7 @@ export class AgentWorker {
       return { goalId: goal.id, messages: [], status: 'complete' };
     }
 
-    return this.runAgentLoop(goal, model, messages, restoredCount);
+    return this.runAgentLoop(goal, model, messages, restoredCount, context);
   }
 
   /**
@@ -353,6 +360,7 @@ export class AgentWorker {
     model: ConfigurableModel,
     messages: BaseMessage[],
     restoredCount: number,
+    context?: Record<string, unknown>,
     maxRounds = 5,
   ): Promise<AgentChildResult> {
     let rounds = 0;
@@ -391,7 +399,7 @@ export class AgentWorker {
           continue;
         }
         try {
-          const result = await handler.handler(tc.args);
+          const result = await handler.handler(tc.args as Record<string, unknown>, context);
           messages.push(
             new ToolMessage({
               content: JSON.stringify(result),
@@ -462,7 +470,7 @@ export class AgentWorker {
     }
 
     const model = await this.createLLM(toToolDefinitions(goal.tools));
-    const { sessionId } = job.data;
+    const { sessionId, context } = job.data;
 
     const messages: BaseMessage[] = [
       new SystemMessage(buildAgentSystemMessage(goal, false)),
@@ -489,7 +497,7 @@ export class AgentWorker {
           continue;
         }
         try {
-          const result = await handler.handler(tc.args);
+          const result = await handler.handler(tc.args, context);
           messages.push(
             new ToolMessage({
               content: JSON.stringify(result),
@@ -513,7 +521,7 @@ export class AgentWorker {
       return { history: [], goalId, status: 'active' };
     }
 
-    const result = await this.runAgentLoop(goal, model, messages, restoredCount);
+    const result = await this.runAgentLoop(goal, model, messages, restoredCount, context);
     const isAwaiting = result.status === 'awaiting-confirm';
 
     return {
@@ -568,14 +576,16 @@ export class AgentWorker {
     agentIds: string[],
     prompt: string,
   ): Promise<string> {
-    const { sessionId } = orchestratorJob.data;
+    const { sessionId, context } = orchestratorJob.data;
     const ts = Date.now();
     const aggregatorJobId = `${sessionId}/${ts}`;
     const { removeOnComplete, removeOnFail } = orchestratorJob.opts;
+    const aggQueue = getQueueName(this.queuePrefix, AGGREGATOR_QUEUE);
+    const agentQueue = getQueueName(this.queuePrefix, AGENT_QUEUE);
 
     await this.flowProducer.add({
       name: 'aggregator',
-      queueName: AGGREGATOR_QUEUE,
+      queueName: aggQueue,
       data: { sessionId },
       opts: {
         jobId: aggregatorJobId,
@@ -584,11 +594,12 @@ export class AgentWorker {
       },
       children: agentIds.map((goalId) => ({
         name: `agent-${goalId}`,
-        queueName: AGENT_QUEUE,
+        queueName: agentQueue,
         data: {
           sessionId,
           goalId,
           prompt,
+          ...(context !== undefined && { context }),
         } satisfies AgentChildJobData,
         opts: {
           jobId: `${sessionId}/${ts}/${goalId}`,
@@ -605,14 +616,16 @@ export class AgentWorker {
     orchestratorJob: Job<OrchestratorJobData>,
     awaitingAgents: [string, AgentChildResult][],
   ): Promise<string> {
-    const { sessionId } = orchestratorJob.data;
+    const { sessionId, context } = orchestratorJob.data;
     const ts = Date.now();
     const aggregatorJobId = `${sessionId}/${ts}`;
     const { removeOnComplete, removeOnFail } = orchestratorJob.opts;
+    const aggQueue = getQueueName(this.queuePrefix, AGGREGATOR_QUEUE);
+    const agentQueue = getQueueName(this.queuePrefix, AGENT_QUEUE);
 
     await this.flowProducer.add({
       name: 'aggregator',
-      queueName: AGGREGATOR_QUEUE,
+      queueName: aggQueue,
       data: { sessionId },
       opts: {
         jobId: aggregatorJobId,
@@ -621,11 +634,12 @@ export class AgentWorker {
       },
       children: awaitingAgents.map(([goalId, result]) => ({
         name: `agent-${goalId}`,
-        queueName: AGENT_QUEUE,
+        queueName: agentQueue,
         data: {
           sessionId,
           goalId,
           toolCalls: deriveToolCalls(result.messages, goalId),
+          ...(context !== undefined && { context }),
         } satisfies AgentChildJobData,
         opts: {
           jobId: `${sessionId}/${ts}/${goalId}`,

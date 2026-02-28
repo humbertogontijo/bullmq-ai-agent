@@ -9,7 +9,10 @@ export interface AgentTool<T extends TObject = TObject> {
   name: string;
   description: string;
   schema: T;
-  handler: (args: Static<T>) => Promise<Record<string, unknown>>;
+  handler: (
+    args: Static<T>,
+    context?: Record<string, unknown>,
+  ) => Promise<Record<string, unknown>>;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -52,6 +55,8 @@ export interface OrchestratorJobData {
   sessionId: string;
   type: JobType;
   prompt?: string;
+  /** Optional context passed through to tool handlers. */
+  context?: Record<string, unknown>;
 }
 
 /** Data for per-agent child jobs (created by the orchestrator worker). */
@@ -61,6 +66,8 @@ export interface AgentChildJobData {
   prompt?: string;
   /** Carried over from a previous awaiting-confirm result on `confirm`. */
   toolCalls?: ToolCall[];
+  /** Optional context passed through to tool handlers. */
+  context?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -124,8 +131,22 @@ export const DEFAULT_JOB_RETENTION: Required<JobRetention> = {
   count: 200,
 };
 
+export interface AgentWorkerLogger {
+  error: (msg: string, err?: Error) => void;
+  warn?: (msg: string) => void;
+  debug?: (msg: string) => void;
+}
+
 export interface AgentWorkerOptions {
   connection: ConnectionOptions;
+  /**
+   * Optional logger for worker errors, warnings, and debug messages.
+   */
+  logger?: AgentWorkerLogger;
+  /**
+   * Optional prefix for queue names. When set, prepended to orchestrator, agent, and aggregator queue names (default empty).
+   */
+  queuePrefix?: string;
   /**
    * LLM configuration passed to langchain's `initChatModel`.
    * Supports any provider with the corresponding `@langchain/*` package installed.
@@ -159,6 +180,8 @@ export interface AgentClientOptions {
   connection: ConnectionOptions;
   /** How long to keep completed/failed result jobs in Redis. */
   jobRetention?: JobRetention;
+  /** Optional prefix for queue names. Must match the worker's queuePrefix. */
+  queuePrefix?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -177,3 +200,8 @@ export interface AgentResponseEvent {
 export const ORCHESTRATOR_QUEUE = 'agent-orchestrator';
 export const AGENT_QUEUE = 'agent-worker';
 export const AGGREGATOR_QUEUE = 'agent-aggregator';
+
+/** Resolve queue name with optional prefix (default empty for backward compatibility). */
+export function getQueueName(prefix: string | undefined, base: string): string {
+  return (prefix ?? '') + base;
+}
