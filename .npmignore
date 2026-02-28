@@ -1,0 +1,9 @@
+src/
+tests/
+examples/
+temporal-ai-agent/
+tsconfig.json
+.github/
+.gitignore
+.agent.json
+*.tsbuildinfo

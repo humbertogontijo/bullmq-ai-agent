@@ -1,0 +1,78 @@
+{
+  "name": "bullmq-ai-agent",
+  "version": "0.1.0",
+  "description": "AI agent library using BullMQ Flows for parallel multi-agent orchestration with LangChain",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "lint": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build",
+    "example:single": "tsx examples/single-agent.ts",
+    "example:multi": "tsx examples/multi-agent.ts"
+  },
+  "keywords": [
+    "bullmq",
+    "ai-agent",
+    "langchain",
+    "llm",
+    "multi-agent",
+    "orchestrator",
+    "openai",
+    "redis",
+    "queue",
+    "workflow"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/humbertogontijo/bullmq-ai-agent.git"
+  },
+  "author": "humbertogontijo",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.1.0",
+    "@sinclair/typebox": "^0.34.0",
+    "bullmq": "^5.0.0",
+    "langchain": "^1.2.0"
+  },
+  "devDependencies": {
+    "@langchain/openai": "^1.2.0",
+    "@types/node": "^25.3.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.0.18"
+  },
+  "peerDependencies": {
+    "ioredis": "^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "ioredis": {
+      "optional": true
+    },
+    "@langchain/openai": {
+      "optional": true
+    },
+    "@langchain/anthropic": {
+      "optional": true
+    },
+    "@langchain/google-genai": {
+      "optional": true
+    }
+  }
+}
