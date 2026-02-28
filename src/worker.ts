@@ -308,7 +308,7 @@ export class AgentWorker {
   private async processAgent(
     job: Job<AgentChildJobData>,
   ): Promise<AgentChildResult> {
-    const { sessionId, goalId, prompt, toolCalls, context, initialMessages } =
+    const { sessionId, goalId, prompt, toolCalls, context, initialMessages, toolChoice } =
       job.data;
     const goal = this.goals.get(goalId);
     if (!goal) {
@@ -380,7 +380,7 @@ export class AgentWorker {
       return { goalId: goal.id, messages: [], status: 'complete' };
     }
 
-    return this.runAgentLoop(goal, model, messages, restoredCount, context);
+    return this.runAgentLoop(goal, model, messages, restoredCount, context, toolChoice);
   }
 
   /**
@@ -395,13 +395,15 @@ export class AgentWorker {
     messages: BaseMessage[],
     restoredCount: number,
     context?: Record<string, unknown>,
+    toolChoice?: string | Record<string, unknown> | 'auto' | 'any' | 'none',
     maxRounds = 5,
   ): Promise<AgentChildResult> {
     let rounds = 0;
+    const invokeOptions = toolChoice !== undefined ? { tool_choice: toolChoice } : undefined;
 
     while (rounds < maxRounds) {
       rounds++;
-      const response = await model.invoke(messages);
+      const response = await model.invoke(messages, invokeOptions);
       messages.push(response);
 
       if (!response.tool_calls?.length) {
@@ -503,7 +505,7 @@ export class AgentWorker {
       return { history: [], goalId, status: 'active' };
     }
 
-    const { sessionId, context, initialMessages } = job.data;
+    const { sessionId, context, initialMessages, toolChoice } = job.data;
     const model = await this.createLLM(toToolDefinitions(goal.tools), {
       goalId,
       context,
@@ -569,7 +571,14 @@ export class AgentWorker {
       return { history: [], goalId, status: 'active' };
     }
 
-    const result = await this.runAgentLoop(goal, model, messages, restoredCount, context);
+    const result = await this.runAgentLoop(
+      goal,
+      model,
+      messages,
+      restoredCount,
+      context,
+      toolChoice,
+    );
     const isAwaiting = result.status === 'awaiting-confirm';
 
     return {
@@ -625,7 +634,7 @@ export class AgentWorker {
     agentIds: string[],
     prompt: string,
   ): Promise<string> {
-    const { sessionId, context, initialMessages } = orchestratorJob.data;
+    const { sessionId, context, initialMessages, toolChoice } = orchestratorJob.data;
     const ts = Date.now();
     const aggregatorJobId = `${sessionId}/${ts}`;
     const { removeOnComplete, removeOnFail } = orchestratorJob.opts;
@@ -650,6 +659,7 @@ export class AgentWorker {
           prompt,
           ...(context !== undefined && { context }),
           ...(initialMessages !== undefined && { initialMessages }),
+          ...(toolChoice !== undefined && { toolChoice }),
         } satisfies AgentChildJobData,
         opts: {
           jobId: `${sessionId}/${ts}/${goalId}`,

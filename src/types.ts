@@ -69,6 +69,11 @@ export interface OrchestratorJobData {
   initialMessages?: SerializedMessage[];
   /** Optional context passed through to tool handlers. */
   context?: Record<string, unknown>;
+  /**
+   * Optional tool choice for this step. Passed to the LLM (e.g. "toolName", "auto", "any", "none").
+   * Lets the caller enforce a specific tool when needed.
+   */
+  toolChoice?: string | Record<string, unknown> | 'auto' | 'any' | 'none';
 }
 
 /** Data for per-agent child jobs (created by the orchestrator worker). */
@@ -82,6 +87,8 @@ export interface AgentChildJobData {
   initialMessages?: SerializedMessage[];
   /** Optional context passed through to tool handlers. */
   context?: Record<string, unknown>;
+  /** Optional tool choice (passed from orchestrator job when present). */
+  toolChoice?: string | Record<string, unknown> | 'auto' | 'any' | 'none';
 }
 
 // ---------------------------------------------------------------------------

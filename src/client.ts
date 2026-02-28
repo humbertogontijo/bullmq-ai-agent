@@ -59,6 +59,10 @@ export class AgentClient {
       goalId?: string;
       /** Optional prefix messages for the conversation. */
       initialMessages?: SerializedMessage[];
+      /** Job priority (BullMQ: lower number = higher priority). */
+      priority?: number;
+      /** Enforce a tool choice for this step (e.g. tool name, "auto", "any", "none"). */
+      toolChoice?: string | Record<string, unknown> | 'auto' | 'any' | 'none';
     },
   ): Promise<StepResult> {
     const job = await this.addOrchestratorJob(sessionId, {
@@ -133,16 +137,21 @@ export class AgentClient {
       context?: Record<string, unknown>;
       goalId?: string;
       initialMessages?: SerializedMessage[];
+      priority?: number;
+      toolChoice?: string | Record<string, unknown> | 'auto' | 'any' | 'none';
     },
   ): Promise<Job> {
+    const { priority, ...jobData } = extra;
+    const opts: { jobId: string; removeOnComplete: KeepJobs; removeOnFail: KeepJobs; priority?: number } = {
+      jobId: `${sessionId}/${Date.now()}`,
+      removeOnComplete: this.keepResult,
+      removeOnFail: this.keepResult,
+    };
+    if (priority !== undefined) opts.priority = priority;
     return this.orchestratorQueue.add(
       'orchestrator-step',
-      { sessionId, ...extra } satisfies OrchestratorJobData,
-      {
-        jobId: `${sessionId}/${Date.now()}`,
-        removeOnComplete: this.keepResult,
-        removeOnFail: this.keepResult,
-      },
+      { sessionId, ...jobData } satisfies OrchestratorJobData,
+      opts,
     );
   }
 
