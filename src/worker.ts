@@ -1,46 +1,48 @@
-import { Worker, FlowProducer, Queue } from 'bullmq';
-import type { Job, ConnectionOptions } from 'bullmq';
-import { initChatModel } from 'langchain/chat_models/universal';
-import type { ConfigurableModel } from 'langchain/chat_models/universal';
+import type { ToolDefinition } from '@langchain/core/language_models/base';
+import type { BaseMessage } from '@langchain/core/messages';
 import {
-  SystemMessage,
-  HumanMessage,
   AIMessage,
+  HumanMessage,
+  SystemMessage,
   ToolMessage,
 } from '@langchain/core/messages';
-import type { BaseMessage } from '@langchain/core/messages';
-import type { ToolDefinition } from '@langchain/core/language_models/base';
+import type { ConnectionOptions, Job } from 'bullmq';
+import { FlowProducer, Queue, Worker } from 'bullmq';
+import type { ConfigurableModel } from 'langchain/chat_models/universal';
+import { initChatModel } from 'langchain/chat_models/universal';
 
+import {
+  deriveRoutingHistory,
+  deriveToolCalls,
+  extractAgentMessages,
+  extractSingleGoalHistory,
+  fetchSessionResults,
+  findLatestResult,
+} from './history.js';
 import {
   buildAgentSystemMessage,
   buildOrchestratorSystemMessage,
   formatHistoryForOrchestrator,
 } from './prompts.js';
 import type {
-  AgentGoal,
-  AnyAgentTool,
-  AgentWorkerOptions,
   AgentChildJobData,
   AgentChildResult,
+  AgentGoal,
+  AgentWorkerLlmConfig,
+  AgentWorkerLogger,
+  AgentWorkerOptions,
+  AnyAgentTool,
   JobType,
   OrchestratorJobData,
   SerializedMessage,
   StepResult,
 } from './types.js';
 import {
-  ORCHESTRATOR_QUEUE,
   AGENT_QUEUE,
   AGGREGATOR_QUEUE,
   getQueueName,
+  ORCHESTRATOR_QUEUE,
 } from './types.js';
-import {
-  fetchSessionResults,
-  findLatestResult,
-  extractSingleGoalHistory,
-  extractAgentMessages,
-  deriveToolCalls,
-  deriveRoutingHistory,
-} from './history.js';
 
 // ---------------------------------------------------------------------------
 // Message serialization helpers
@@ -129,12 +131,12 @@ function toToolDefinitions(tools: AnyAgentTool[]): ToolDefinition[] {
 
 export class AgentWorker {
   private readonly connection: ConnectionOptions;
-  private readonly llmConfig: AgentWorkerOptions['llm'];
+  private readonly llmConfig: AgentWorkerLlmConfig;
   private readonly goals: Map<string, AgentGoal>;
   private readonly showConfirmation: boolean;
   private readonly multiGoalMode: boolean;
   private readonly queuePrefix: string;
-  private readonly logger: AgentWorkerOptions['logger'];
+  private readonly logger?: AgentWorkerLogger;
 
   private orchestratorWorker!: Worker;
   private agentWorkerInstance!: Worker;
@@ -145,7 +147,7 @@ export class AgentWorker {
 
   constructor(options: AgentWorkerOptions) {
     this.connection = options.connection;
-    this.llmConfig = options.llm;
+    this.llmConfig = options.llmConfig;
     this.showConfirmation = options.showConfirmation ?? true;
     this.goals = new Map(options.goals.map((g) => [g.id, g]));
     this.multiGoalMode = options.goals.length > 1;
@@ -212,8 +214,16 @@ export class AgentWorker {
   // LLM construction
   // -----------------------------------------------------------------------
 
-  private async createLLM(tools?: ToolDefinition[]): Promise<ConfigurableModel> {
-    const { model, modelProvider, apiKey, ...rest } = this.llmConfig;
+  private async createLLM(
+    tools?: ToolDefinition[],
+    jobContext?: { goalId?: string; context?: Record<string, unknown> },
+  ): Promise<ConfigurableModel> {
+    const config = await this.llmConfig({
+      goalId: jobContext?.goalId,
+      context: jobContext?.context,
+    });
+    const { model, modelProvider, apiKey, ...rest } = config;
+
     const llm = await initChatModel(model, {
       ...(modelProvider ? { modelProvider } : {}),
       ...(apiKey ? { apiKey } : {}),
@@ -245,18 +255,27 @@ export class AgentWorker {
       };
     }
 
-    if (!this.multiGoalMode) {
-      const singleGoalId = prevState?.goalId ?? [...this.goals.keys()][0];
+    // Single-goal mode, or explicit goalId (run as single-goal so history stays in orchestrator)
+    if (!this.multiGoalMode || job.data.goalId) {
+      const singleGoalId =
+      job.data.goalId ?? prevState?.goalId ?? [...this.goals.keys()][0];
       return this.processSingleGoalStep(job, singleGoalId, type, prompt, prevState);
     }
 
-    // Multi-goal mode
+    // Multi-goal mode (routing, no explicit goalId)
     if (type === 'prompt') {
-      const prevHistory = prevState?.agentResults
-        ? deriveRoutingHistory(prevState.agentResults)
-        : prevState?.history ?? [];
-      const agentIds = await this.routeToAgents(prompt ?? '', prevHistory);
-      const routingJobId = await this.createAgentFlow(job, agentIds, prompt ?? '');
+      const agentIds = await this.routeToAgents(
+            prompt ?? '',
+            prevState?.agentResults
+              ? deriveRoutingHistory(prevState.agentResults)
+              : prevState?.history ?? [],
+            job.data.context,
+          );
+      const routingJobId = await this.createAgentFlow(
+        job,
+        agentIds,
+        prompt ?? '',
+      );
       return {
         history: prompt ? [{ role: 'human' as const, content: prompt }] : [],
         status: 'routing',
@@ -289,20 +308,35 @@ export class AgentWorker {
   private async processAgent(
     job: Job<AgentChildJobData>,
   ): Promise<AgentChildResult> {
-    const { sessionId, goalId, prompt, toolCalls, context } = job.data;
+    const { sessionId, goalId, prompt, toolCalls, context, initialMessages } =
+      job.data;
     const goal = this.goals.get(goalId);
     if (!goal) {
       return { goalId, messages: [], status: 'complete' };
     }
 
-    const model = await this.createLLM(toToolDefinitions(goal.tools));
+    const model = await this.createLLM(toToolDefinitions(goal.tools), {
+      goalId,
+      context,
+    });
 
     const messages: BaseMessage[] = [
       new SystemMessage(buildAgentSystemMessage(goal, this.multiGoalMode)),
     ];
 
-    const aggResults = await fetchSessionResults(this.aggregatorQueue, sessionId);
-    const agentHistory = extractAgentMessages(aggResults, goalId);
+    if (initialMessages?.length) {
+      messages.push(...deserializeMessages(initialMessages));
+    }
+
+    // Merge both queues so switching single/multi-goal does not lose history
+    const [orchResults, aggResults] = await Promise.all([
+      fetchSessionResults(this.orchestratorQueue, sessionId),
+      fetchSessionResults(this.aggregatorQueue, sessionId),
+    ]);
+    const agentHistory = [
+      ...extractSingleGoalHistory(orchResults),
+      ...extractAgentMessages(aggResults, goalId),
+    ];
     if (agentHistory.length) {
       messages.push(...deserializeMessages(agentHistory));
     }
@@ -469,15 +503,29 @@ export class AgentWorker {
       return { history: [], goalId, status: 'active' };
     }
 
-    const model = await this.createLLM(toToolDefinitions(goal.tools));
-    const { sessionId, context } = job.data;
+    const { sessionId, context, initialMessages } = job.data;
+    const model = await this.createLLM(toToolDefinitions(goal.tools), {
+      goalId,
+      context,
+    });
 
     const messages: BaseMessage[] = [
       new SystemMessage(buildAgentSystemMessage(goal, false)),
     ];
 
-    const orchResults = await fetchSessionResults(this.orchestratorQueue, sessionId);
-    const fullHistory = extractSingleGoalHistory(orchResults);
+    if (initialMessages?.length) {
+      messages.push(...deserializeMessages(initialMessages));
+    }
+
+    // Merge both queues so switching single/multi-goal does not lose history
+    const [orchResults, aggResults] = await Promise.all([
+      fetchSessionResults(this.orchestratorQueue, sessionId),
+      fetchSessionResults(this.aggregatorQueue, sessionId),
+    ]);
+    const fullHistory = [
+      ...extractSingleGoalHistory(orchResults),
+      ...extractAgentMessages(aggResults, goalId),
+    ];
     if (fullHistory.length) {
       messages.push(...deserializeMessages(fullHistory));
     }
@@ -541,9 +589,10 @@ export class AgentWorker {
   private async routeToAgents(
     prompt: string,
     history: SerializedMessage[],
+    context?: Record<string, unknown>,
   ): Promise<string[]> {
     const goals = [...this.goals.values()];
-    const model = await this.createLLM();
+    const model = await this.createLLM(undefined, { context });
 
     const systemMsg = buildOrchestratorSystemMessage(goals);
     const historyContext = formatHistoryForOrchestrator(history);
@@ -576,7 +625,7 @@ export class AgentWorker {
     agentIds: string[],
     prompt: string,
   ): Promise<string> {
-    const { sessionId, context } = orchestratorJob.data;
+    const { sessionId, context, initialMessages } = orchestratorJob.data;
     const ts = Date.now();
     const aggregatorJobId = `${sessionId}/${ts}`;
     const { removeOnComplete, removeOnFail } = orchestratorJob.opts;
@@ -600,6 +649,7 @@ export class AgentWorker {
           goalId,
           prompt,
           ...(context !== undefined && { context }),
+          ...(initialMessages !== undefined && { initialMessages }),
         } satisfies AgentChildJobData,
         opts: {
           jobId: `${sessionId}/${ts}/${goalId}`,
@@ -616,7 +666,7 @@ export class AgentWorker {
     orchestratorJob: Job<OrchestratorJobData>,
     awaitingAgents: [string, AgentChildResult][],
   ): Promise<string> {
-    const { sessionId, context } = orchestratorJob.data;
+    const { sessionId, context, initialMessages } = orchestratorJob.data;
     const ts = Date.now();
     const aggregatorJobId = `${sessionId}/${ts}`;
     const { removeOnComplete, removeOnFail } = orchestratorJob.opts;
@@ -640,6 +690,7 @@ export class AgentWorker {
           goalId,
           toolCalls: deriveToolCalls(result.messages, goalId),
           ...(context !== undefined && { context }),
+          ...(initialMessages !== undefined && { initialMessages }),
         } satisfies AgentChildJobData,
         opts: {
           jobId: `${sessionId}/${ts}/${goalId}`,

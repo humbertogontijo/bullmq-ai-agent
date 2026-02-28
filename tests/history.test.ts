@@ -1,19 +1,19 @@
-import { describe, it, expect } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
-  extractSingleGoalHistory,
-  extractAgentMessages,
   buildConversationHistory,
   deriveResponse,
-  deriveToolCalls,
   deriveRoutingHistory,
+  deriveToolCalls,
+  extractAgentMessages,
+  extractSingleGoalHistory,
 } from '../src/history.js';
-import type { StepResult, SerializedMessage, AgentChildResult } from '../src/types.js';
+import type { AgentChildResult, SerializedMessage, SerializedMessageRole, StepResult } from '../src/types.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 
-function msg(role: SerializedMessage['role'], content: string, extra?: Partial<SerializedMessage>): SerializedMessage {
+function msg(role: SerializedMessageRole, content: string, extra?: Partial<SerializedMessage>): SerializedMessage {
   return { role, content, ...extra };
 }
 

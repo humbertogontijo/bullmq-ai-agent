@@ -1,4 +1,4 @@
-import type { TObject, Static } from '@sinclair/typebox';
+import type { Static, TObject } from '@sinclair/typebox';
 import type { ConnectionOptions } from 'bullmq';
 
 // ---------------------------------------------------------------------------
@@ -31,8 +31,10 @@ export interface AgentGoal {
 // Serialized LangChain messages (stored in BullMQ job returnvalue)
 // ---------------------------------------------------------------------------
 
+export type SerializedMessageRole = 'system' | 'human' | 'ai' | 'tool';
+
 export interface SerializedMessage {
-  role: 'system' | 'human' | 'ai' | 'tool';
+  role: SerializedMessageRole;
   content: string;
   toolCallId?: string;
   toolCalls?: SerializedToolCall[];
@@ -55,6 +57,16 @@ export interface OrchestratorJobData {
   sessionId: string;
   type: JobType;
   prompt?: string;
+  /**
+   * When set with type === 'prompt', use this goal only (no LLM routing).
+   * Lets the webapp send "run conversation goal" vs "run analyze goal" explicitly.
+   */
+  goalId?: string;
+  /**
+   * Optional prefix messages. Worker always uses fetchSessionResults; when present,
+   * message list is: deserialize(initialMessages) + session history + (if prompt) HumanMessage(prompt).
+   */
+  initialMessages?: SerializedMessage[];
   /** Optional context passed through to tool handlers. */
   context?: Record<string, unknown>;
 }
@@ -66,6 +78,8 @@ export interface AgentChildJobData {
   prompt?: string;
   /** Carried over from a previous awaiting-confirm result on `confirm`. */
   toolCalls?: ToolCall[];
+  /** Optional prefix messages (passed from orchestrator job when present). */
+  initialMessages?: SerializedMessage[];
   /** Optional context passed through to tool handlers. */
   context?: Record<string, unknown>;
 }
@@ -137,6 +151,20 @@ export interface AgentWorkerLogger {
   debug?: (msg: string) => void;
 }
 
+export interface AgentWorkerLlmConfigData {
+  model: string;
+  modelProvider?: string;
+  apiKey?: string;
+  temperature?: number;
+  maxTokens?: number;
+  [key: string]: unknown;
+}
+
+export type AgentWorkerLlmConfig = (options: {
+  goalId?: string;
+  context?: Record<string, unknown>;
+}) => Promise<AgentWorkerLlmConfigData>
+
 export interface AgentWorkerOptions {
   connection: ConnectionOptions;
   /**
@@ -148,29 +176,10 @@ export interface AgentWorkerOptions {
    */
   queuePrefix?: string;
   /**
-   * LLM configuration passed to langchain's `initChatModel`.
-   * Supports any provider with the corresponding `@langchain/*` package installed.
-   *
-   * @example
-   * // OpenAI  (requires @langchain/openai)
-   * { model: "openai:gpt-4o", apiKey: "sk-..." }
-   *
-   * // Anthropic  (requires @langchain/anthropic)
-   * { model: "anthropic:claude-3-5-sonnet-latest", apiKey: "sk-ant-..." }
-   *
-   * // Explicit provider
-   * { model: "gpt-4o", modelProvider: "openai", temperature: 0.2 }
+   * Called at the start of each orchestrator/agent step. Returned config is passed
+   * to langchain's `initChatModel`. Use for per-job, per-goal, or static LLM config.
    */
-  llm: {
-    /** Model identifier. Supports "provider:model" format (e.g. "openai:gpt-4o"). */
-    model: string;
-    /** Explicit provider name. Optional when provider is embedded in the model string. */
-    modelProvider?: string;
-    /** API key for the provider. Can also be set via env var (e.g. OPENAI_API_KEY). */
-    apiKey?: string;
-    /** Any additional options forwarded to initChatModel (temperature, maxTokens, etc.). */
-    [key: string]: unknown;
-  };
+  llmConfig: AgentWorkerLlmConfig;
   goals: AgentGoal[];
   /** Require user confirmation before executing tools. Default `true`. */
   showConfirmation?: boolean;

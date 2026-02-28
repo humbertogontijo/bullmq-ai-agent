@@ -45,7 +45,7 @@ async function main() {
 
   const worker = new AgentWorker({
     connection: REDIS,
-    llm: { model: 'openai:gpt-4o', apiKey },
+    llmConfig: async () => ({ model: 'openai:gpt-4o', apiKey }),
     goals: [flightGoal, hrGoal],
     showConfirmation: true,
   });

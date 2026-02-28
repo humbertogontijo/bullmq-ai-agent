@@ -119,7 +119,10 @@ import { AgentWorker } from 'bullmq-ai-agent';
 
 const worker = new AgentWorker({
   connection: { host: 'localhost', port: 6379 },
-  llm: { model: 'openai:gpt-4o', apiKey: process.env.OPENAI_API_KEY },
+  llmConfig: async () => ({
+    model: 'openai:gpt-4o',
+    apiKey: process.env.OPENAI_API_KEY,
+  }),
   goals: [flightGoal],
   showConfirmation: true, // require user approval before tool execution
 });
@@ -158,7 +161,10 @@ Pass multiple goals and the orchestrator automatically routes each prompt to the
 ```typescript
 const worker = new AgentWorker({
   connection: { host: 'localhost', port: 6379 },
-  llm: { model: 'openai:gpt-4o', apiKey: process.env.OPENAI_API_KEY },
+  llmConfig: async () => ({
+    model: 'openai:gpt-4o',
+    apiKey: process.env.OPENAI_API_KEY,
+  }),
   goals: [flightGoal, hrGoal, expenseGoal], // 2+ goals enables multi-agent mode
 });
 ```
@@ -179,9 +185,7 @@ new AgentWorker(options: AgentWorkerOptions)
 | Option              | Type                | Description                                                       |
 | ------------------- | ------------------- | ----------------------------------------------------------------- |
 | `connection`        | `ConnectionOptions` | Redis connection (from BullMQ)                                    |
-| `llm.model`         | `string`            | Model identifier, supports `"provider:model"` format              |
-| `llm.modelProvider` | `string?`           | Explicit provider name (optional if embedded in model string)     |
-| `llm.apiKey`        | `string?`           | API key (can also use env vars like `OPENAI_API_KEY`)             |
+| `llmConfig`        | `(options) => Promise<AgentWorkerLlmConfigData>` | Called each step; return config for `initChatModel` (model, apiKey, etc.) |
 | `goals`             | `AgentGoal[]`       | One or more agent goals with tools                                |
 | `showConfirmation`  | `boolean?`          | Require user confirmation before tool execution (default: `true`) |
 
@@ -235,21 +239,28 @@ interface StepResult {
 
 ## LLM Configuration
 
-The `llm` option uses LangChain's `[initChatModel](https://js.langchain.com/docs/how_to/chat_models_universal_init/)` under the hood, so any provider with a `@langchain/*` package works:
+`llmConfig` is called at the start of each orchestrator/agent step with `{ goalId?, context? }`. Return an object that LangChain's `[initChatModel](https://js.langchain.com/docs/how_to/chat_models_universal_init/)` accepts. Any provider with a `@langchain/*` package works:
 
 ```typescript
-// OpenAI
-{ model: 'openai:gpt-4o', apiKey: 'sk-...' }
+// Static config (same for every step)
+llmConfig: async () => ({
+  model: 'openai:gpt-4o',
+  apiKey: process.env.OPENAI_API_KEY,
+})
 
-// Anthropic
-{ model: 'anthropic:claude-sonnet-4-20250514', apiKey: 'sk-ant-...' }
-
-// Google
-{ model: 'google-genai:gemini-2.0-flash', apiKey: '...' }
-
-// With extra options
-{ model: 'openai:gpt-4o', apiKey: 'sk-...', temperature: 0.2, maxTokens: 4096 }
+// Per-goal or per-request
+llmConfig: async ({ goalId, context }) => ({
+  model: goalId === 'hr-pto' ? 'anthropic:claude-3-5-sonnet' : 'openai:gpt-4o',
+  apiKey: process.env.OPENAI_API_KEY,
+  temperature: context?.temperature ?? 0.2,
+})
 ```
+
+### Explicit goal and session history
+
+When you pass `goalId` to `sendPrompt`, the worker runs that goal in **single-goal mode**: the orchestrator runs the agent directly and stores the step in the orchestrator queue (no routing, no flow). That keeps behavior consistent when you pin a conversation to one goal.
+
+Session history is always built from **both** the orchestrator and aggregator queues. So if you switch between single-goal (or explicit `goalId`) and multi-goal routing in the same session, you do not lose history: the worker merges prior single-goal steps and prior multi-goal steps for the current goal when building the message list for the LLM.
 
 ## Examples
 

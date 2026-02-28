@@ -8,6 +8,7 @@ import {
 import type {
   AgentClientOptions,
   JobRetention,
+  JobType,
   OrchestratorJobData,
   SerializedMessage,
   StepResult
@@ -52,12 +53,18 @@ export class AgentClient {
   async sendPrompt(
     sessionId: string,
     prompt: string,
-    context?: Record<string, unknown>,
+    options?: {
+      context?: Record<string, unknown>;
+      /** When set, use this goal only (no LLM routing). */
+      goalId?: string;
+      /** Optional prefix messages for the conversation. */
+      initialMessages?: SerializedMessage[];
+    },
   ): Promise<StepResult> {
     const job = await this.addOrchestratorJob(sessionId, {
       type: 'prompt',
       prompt,
-      context,
+      ...options,
     });
     return this.resolveResult(job);
   }
@@ -121,9 +128,11 @@ export class AgentClient {
   private async addOrchestratorJob(
     sessionId: string,
     extra: {
-      type: OrchestratorJobData['type'];
+      type: JobType;
       prompt?: string;
       context?: Record<string, unknown>;
+      goalId?: string;
+      initialMessages?: SerializedMessage[];
     },
   ): Promise<Job> {
     return this.orchestratorQueue.add(
