@@ -1,6 +1,8 @@
 export { AgentWorker } from './worker.js';
 export { AgentClient } from './client.js';
 export { deriveResponse, deriveToolCalls } from './history.js';
+export { waitForJobWithProgress } from './waitWithProgress.js';
+export type { ProgressSource } from './waitWithProgress.js';
 
 export {
   ORCHESTRATOR_QUEUE,
@@ -16,6 +18,8 @@ export type {
   AgentWorkerLogger,
   AgentClientOptions,
   AgentResponseEvent,
+  JobProgress,
+  JobProgressPhase,
   JobRetention,
   ToolCall,
   SerializedMessage,

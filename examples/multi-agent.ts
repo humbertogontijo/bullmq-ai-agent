@@ -4,12 +4,24 @@
  * Two goals → orchestrator LLM routes each prompt to the right agent(s),
  * which run in parallel via BullMQ Flows.
  * Session persists across runs — restart and pick up where you left off.
+ * Uses @clack/prompts and job progress (routing, thinking, typing, etc.).
  *
  * Run: npx tsx examples/multi-agent.ts
  */
 
+import * as p from '@clack/prompts';
+
 import { AgentClient, AgentWorker, type AgentGoal } from '../src/index.js';
-import { askApiKey, askConfirm, askInput, closeInput, printHistory, printResult, printToolCalls } from './utils/cli.js';
+import {
+  askApiKey,
+  askConfirm,
+  askInput,
+  closeInput,
+  printHistory,
+  printResult,
+  printToolCalls,
+  progressLabel,
+} from './utils/cli.js';
 import { bookFlight, bookPTO, checkPTO, searchFlights } from './utils/tools.js';
 
 const REDIS = { host: 'localhost', port: 6379 };
@@ -41,6 +53,8 @@ const hrGoal: AgentGoal = {
 // --- Chat loop ---
 
 async function main() {
+  p.intro('Flight Finder + HR Assistant (multi-agent)');
+
   const apiKey = await askApiKey();
 
   const worker = new AgentWorker({
@@ -57,7 +71,7 @@ async function main() {
 
   const history = await client.getConversationHistory(sessionId);
   if (history.length > 0) {
-    console.log('\x1b[2mResuming previous conversation...\x1b[0m');
+    p.log.message('Resuming previous conversation...');
     printHistory(history);
   }
 
@@ -66,13 +80,27 @@ async function main() {
     if (input === null) break;
     if (input === '') continue;
 
-    let result = await client.sendPrompt(sessionId, input, { autoExecuteTools: true });
+    const progressSpinner = p.spinner();
+    progressSpinner.start('Sending...');
+
+    let result = await client.sendPrompt(sessionId, input, {
+      autoExecuteTools: true,
+      onProgress: (progress) => progressSpinner.message(progressLabel(progress)),
+    });
+
+    progressSpinner.stop('Done');
     printResult(result);
 
     while (result.status === 'awaiting-confirm') {
       printToolCalls(result);
       if (await askConfirm()) {
-        result = await client.confirm(sessionId);
+        const confirmSpinner = p.spinner();
+        confirmSpinner.start('Confirming...');
+        result = await client.confirm(sessionId, undefined, {
+          onProgress: (progress) =>
+            confirmSpinner.message(progressLabel(progress)),
+        });
+        confirmSpinner.stop('Done');
         printResult(result);
       } else {
         break;
@@ -83,6 +111,8 @@ async function main() {
   closeInput();
   await client.close();
   await worker.close();
+
+  p.outro('Goodbye!');
   process.exit(0);
 }
 

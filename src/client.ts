@@ -7,18 +7,21 @@ import {
 } from './history.js';
 import type {
   AgentClientOptions,
+  JobProgress,
   JobRetention,
   JobType,
   OrchestratorJobData,
   SerializedMessage,
-  StepResult
+  StepResult,
 } from './types.js';
 import {
+  AGENT_QUEUE,
   AGGREGATOR_QUEUE,
   DEFAULT_JOB_RETENTION,
   getQueueName,
   ORCHESTRATOR_QUEUE,
 } from './types.js';
+import { waitForJobWithProgress } from './waitWithProgress.js';
 
 export class AgentClient {
   private readonly connection: ConnectionOptions;
@@ -26,6 +29,7 @@ export class AgentClient {
   private readonly aggregatorQueue: Queue;
   private readonly orchestratorEvents: QueueEvents;
   private readonly aggregatorEvents: QueueEvents;
+  private readonly agentEvents: QueueEvents;
   private readonly retention: Required<JobRetention>;
   private readonly keepResult: KeepJobs;
 
@@ -36,6 +40,7 @@ export class AgentClient {
     const prefix = options.queuePrefix;
     const orchQueue = getQueueName(prefix, ORCHESTRATOR_QUEUE);
     const aggQueue = getQueueName(prefix, AGGREGATOR_QUEUE);
+    const agentQueue = getQueueName(prefix, AGENT_QUEUE);
     this.orchestratorQueue = new Queue(orchQueue, {
       connection: this.connection,
     });
@@ -46,6 +51,9 @@ export class AgentClient {
       connection: this.connection,
     });
     this.aggregatorEvents = new QueueEvents(aggQueue, {
+      connection: this.connection,
+    });
+    this.agentEvents = new QueueEvents(agentQueue, {
       connection: this.connection,
     });
   }
@@ -65,6 +73,8 @@ export class AgentClient {
       toolChoice?: string | Record<string, unknown> | 'auto' | 'any' | 'none';
       /** When true, tools run automatically without confirmation. When omitted or false, user confirmation is required. */
       autoExecuteTools?: boolean;
+      /** Called when the job reports progress (e.g. prompt-read, thinking, typing). Uses BullMQ job progress. */
+      onProgress?: (progress: JobProgress) => void;
     },
   ): Promise<StepResult> {
     const job = await this.addOrchestratorJob(sessionId, {
@@ -72,18 +82,22 @@ export class AgentClient {
       prompt,
       ...options,
     });
-    return this.resolveResult(job);
+    return this.resolveResult(job, options?.onProgress);
   }
 
   async confirm(
     sessionId: string,
     context?: Record<string, unknown>,
+    options?: {
+      /** Called when the job reports progress. Uses BullMQ job progress. */
+      onProgress?: (progress: JobProgress) => void;
+    },
   ): Promise<StepResult> {
     const job = await this.addOrchestratorJob(sessionId, {
       type: 'confirm',
       context,
     });
-    return this.resolveResult(job);
+    return this.resolveResult(job, options?.onProgress);
   }
 
   async endChat(
@@ -123,6 +137,7 @@ export class AgentClient {
   async close(): Promise<void> {
     await this.orchestratorEvents.close();
     await this.aggregatorEvents.close();
+    await this.agentEvents.close();
     await this.orchestratorQueue.close();
     await this.aggregatorQueue.close();
   }
@@ -157,13 +172,25 @@ export class AgentClient {
     );
   }
 
-  private async resolveResult(job: Job): Promise<StepResult> {
-    const rawResult = await job.waitUntilFinished(this.orchestratorEvents);
+  private async resolveResult(
+    job: Job<OrchestratorJobData>,
+    onProgress?: (progress: JobProgress) => void,
+  ): Promise<StepResult> {
+    const sessionId = job.data.sessionId;
+    const rawResult = await waitForJobWithProgress<StepResult | string>(
+      job,
+      this.orchestratorEvents,
+      onProgress,
+    );
     const result: StepResult =
       typeof rawResult === 'string' ? JSON.parse(rawResult) : rawResult;
 
     if (result.status === 'routing' && result.routingJobId) {
-      return this.waitForAggregator(result.routingJobId);
+      return this.waitForAggregator(
+        result.routingJobId,
+        sessionId,
+        onProgress,
+      );
     }
 
     return result;
@@ -171,13 +198,32 @@ export class AgentClient {
 
   private async waitForAggregator(
     aggregatorJobId: string,
+    sessionId: string,
+    onProgress?: (progress: JobProgress) => void,
   ): Promise<StepResult> {
     const aggJob = await this.aggregatorQueue.getJob(aggregatorJobId);
     if (!aggJob) {
       throw new Error(`Aggregator job ${aggregatorJobId} not found`);
     }
 
-    const rawResult = await aggJob.waitUntilFinished(this.aggregatorEvents);
+    const effectiveSessionId =
+      sessionId ?? (aggJob.data as { sessionId?: string }).sessionId;
+
+    const rawResult = await waitForJobWithProgress<StepResult | string>(
+      aggJob,
+      this.aggregatorEvents,
+      onProgress,
+      [
+        ...(effectiveSessionId ? [{
+          events: this.agentEvents,
+          isRelevant: (_jobId: string, data: unknown) =>
+            data != null &&
+            typeof data === 'object' &&
+            'sessionId' in data &&
+            data.sessionId === effectiveSessionId,
+        }] : []),
+      ],
+    );
     return typeof rawResult === 'string' ? JSON.parse(rawResult) : rawResult;
   }
 }

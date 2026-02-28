@@ -206,6 +206,28 @@ export interface AgentClientOptions {
 }
 
 // ---------------------------------------------------------------------------
+// Job progress (BullMQ job.updateProgress payload)
+// ---------------------------------------------------------------------------
+
+export type JobProgressPhase =
+  | 'prompt-read'
+  | 'routing'
+  | 'thinking'
+  | 'typing'
+  | 'executing-tool'
+  | 'aggregating';
+
+export interface JobProgress {
+  phase: JobProgressPhase;
+  /** Present when progress is from an orchestrator or agent job (for client filtering). */
+  sessionId?: string;
+  /** Present when progress is from an agent child job (multi-goal). */
+  goalId?: string;
+  /** Present when phase is 'executing-tool'. */
+  toolName?: string;
+}
+
+// ---------------------------------------------------------------------------
 // Client helpers
 // ---------------------------------------------------------------------------
 

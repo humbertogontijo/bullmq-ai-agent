@@ -32,6 +32,7 @@ import type {
   AgentWorkerLogger,
   AgentWorkerOptions,
   AnyAgentTool,
+  JobProgress,
   JobType,
   OrchestratorJobData,
   SerializedMessage,
@@ -252,6 +253,11 @@ export class AgentWorker {
   ): Promise<StepResult> {
     const { sessionId, type, prompt } = job.data;
 
+    await job.updateProgress({
+      phase: 'prompt-read',
+      sessionId,
+    });
+
     const prevState = await findLatestResult(
       this.orchestratorQueue,
       this.aggregatorQueue,
@@ -275,6 +281,7 @@ export class AgentWorker {
 
     // Multi-goal mode (routing, no explicit goalId)
     if (type === 'prompt') {
+      await job.updateProgress({ phase: 'routing', sessionId });
       const agentIds = await this.routeToAgents(
         prompt ?? '',
         prevState?.agentResults
@@ -391,6 +398,9 @@ export class AgentWorker {
       return { goalId: goal.id, messages: [], status: 'complete' };
     }
 
+    const onProgress = (progress: JobProgress) =>
+      job.updateProgress({ ...progress, sessionId, goalId });
+
     return this.runAgentLoop(
       goal,
       model,
@@ -399,6 +409,7 @@ export class AgentWorker {
       context,
       toolChoice,
       autoExecuteTools === true,
+      onProgress,
     );
   }
 
@@ -416,6 +427,7 @@ export class AgentWorker {
     context?: Record<string, unknown>,
     toolChoice?: string | Record<string, unknown> | 'auto' | 'any' | 'none',
     autoExecuteTools = false,
+    onProgress?: (progress: JobProgress) => void,
     maxRounds = 5,
   ): Promise<AgentChildResult> {
     let rounds = 0;
@@ -423,10 +435,12 @@ export class AgentWorker {
 
     while (rounds < maxRounds) {
       rounds++;
+      onProgress?.({ phase: 'thinking' });
       const response = await model.invoke(messages, invokeOptions);
       messages.push(response);
 
       if (!response.tool_calls?.length) {
+        onProgress?.({ phase: 'typing' });
         return {
           goalId: goal.id,
           messages: serializeMessages(messages.slice(restoredCount)),
@@ -444,6 +458,7 @@ export class AgentWorker {
 
       // Auto-execute tools
       for (const tc of response.tool_calls) {
+        onProgress?.({ phase: 'executing-tool', toolName: tc.name });
         const handler = goal.tools.find((t) => t.name === tc.name);
         if (!handler) {
           messages.push(
@@ -487,8 +502,12 @@ export class AgentWorker {
   // -----------------------------------------------------------------------
 
   private async processAggregator(
-    job: Job,
+    job: Job<{ sessionId: string }>,
   ): Promise<StepResult> {
+    await job.updateProgress({
+      phase: 'aggregating',
+      sessionId: job.data.sessionId,
+    });
     const childValues = await job.getChildrenValues<AgentChildResult>();
     const agentResults: Record<string, AgentChildResult> = {};
 
@@ -591,6 +610,9 @@ export class AgentWorker {
       return { history: [], goalId, status: 'active' };
     }
 
+    const onProgress = (progress: JobProgress) =>
+      job.updateProgress({ ...progress, sessionId: job.data.sessionId, goalId });
+
     const result = await this.runAgentLoop(
       goal,
       model,
@@ -599,6 +621,7 @@ export class AgentWorker {
       context,
       toolChoice,
       autoExecuteTools === true,
+      onProgress,
     );
     const isAwaiting = result.status === 'awaiting-confirm';
 

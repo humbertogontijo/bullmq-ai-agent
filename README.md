@@ -10,6 +10,7 @@ Define goals and tools, connect any LLM, and let BullMQ handle the rest — para
 - **Provider Agnostic** — works with any LLM supported by LangChain (`openai`, `anthropic`, `google-genai`, etc.)
 - **Persistent Sessions** — conversations survive restarts; resume any session from where it left off
 - **Tool Confirmation** — optionally require user approval before executing tool calls
+- **Job Progress** — optional progress callbacks (prompt-read, thinking, typing, etc.) via BullMQ `job.updateProgress()`
 - **Redis-Backed** — all state lives in Redis via BullMQ; no additional database needed
 - **Type-Safe Tools** — define tool schemas with [TypeBox](https://github.com/sinclairzx81/typebox) for full type inference
 
@@ -140,8 +141,10 @@ const client = new AgentClient({
 
 const sessionId = 'user-123';
 
-// Send a prompt
-let result = await client.sendPrompt(sessionId, 'Find flights from SFO to JFK on March 15');
+// Send a prompt (optionally with progress callback)
+let result = await client.sendPrompt(sessionId, 'Find flights from SFO to JFK on March 15', {
+  onProgress: (p) => console.log(p.phase), // 'prompt-read' | 'thinking' | 'typing' | ...
+});
 
 // If the agent wants to call a tool (confirmation is always required)
 if (result.status === 'awaiting-confirm') {
@@ -210,8 +213,8 @@ new AgentClient(options: AgentClientOptions)
 
 **Methods:**
 
-- `sendPrompt(sessionId, prompt, options?): Promise<StepResult>` — Send a user message. Options: `goalId`, `context`, `initialMessages`, `priority`, `toolChoice`, `autoExecuteTools` (when `true`, tools run automatically; when omitted or false, user confirmation is required).
-- `confirm(sessionId, context?): Promise<StepResult>` — Approve pending tool calls
+- `sendPrompt(sessionId, prompt, options?): Promise<StepResult>` — Send a user message. Options: `goalId`, `context`, `initialMessages`, `priority`, `toolChoice`, `autoExecuteTools`, `onProgress(progress)` (called with job progress: prompt-read, thinking, typing, etc.).
+- `confirm(sessionId, context?, options?): Promise<StepResult>` — Approve pending tool calls. Options: `onProgress(progress)`.
 - `endChat(sessionId): Promise<StepResult>` — End the conversation
 - `getConversationHistory(sessionId): Promise<SerializedMessage[]>` — Get full history
 - `close(): Promise<void>` — Close client connections
@@ -227,6 +230,19 @@ interface StepResult {
   toolCalls?: ToolCall[];             // Pending tool calls (when awaiting-confirm)
   agentResults?: Record<string, AgentChildResult>; // Per-agent results (multi-agent mode)
   status: 'active' | 'awaiting-confirm' | 'ended' | 'routing';
+}
+```
+
+### `JobProgress`
+
+When using `onProgress` with `sendPrompt` or `confirm`, the callback receives objects of this shape (from BullMQ job progress):
+
+```typescript
+interface JobProgress {
+  phase: 'prompt-read' | 'routing' | 'thinking' | 'typing' | 'executing-tool' | 'aggregating';
+  sessionId?: string;
+  goalId?: string;   // present in multi-agent mode
+  toolName?: string; // present when phase is 'executing-tool'
 }
 ```
 
