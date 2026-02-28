@@ -1,6 +1,6 @@
 {
   "name": "bullmq-ai-agent",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "AI agent library using BullMQ Flows for parallel multi-agent orchestration with LangChain",
   "type": "module",
   "main": "dist/index.js",
