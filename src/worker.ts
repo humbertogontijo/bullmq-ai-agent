@@ -111,6 +111,29 @@ function deserializeMessages(msgs: SerializedMessage[]): BaseMessage[] {
   });
 }
 
+const PENDING_TOOL_ERROR = JSON.stringify({
+  error: 'Tool execution was not completed in a previous turn.',
+});
+
+/**
+ * If the last message is an AI message with tool_calls and no following tool
+ * messages, appends placeholder tool responses so the provider accepts the
+ * history. Call this before appending a new user message when the user sent a
+ * prompt without confirming pending tool calls.
+ */
+function ensureNoPendingToolCalls(messages: BaseMessage[]): void {
+  const last = messages[messages.length - 1];
+  if (!(last instanceof AIMessage) || !last.tool_calls?.length) return;
+  for (const tc of last.tool_calls) {
+    messages.push(
+      new ToolMessage({
+        content: PENDING_TOOL_ERROR,
+        tool_call_id: tc.id ?? '',
+      }),
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Convert user-defined AgentTool → ToolDefinition (OpenAI function-calling format).
 // ---------------------------------------------------------------------------
@@ -393,6 +416,7 @@ export class AgentWorker {
         }
       }
     } else if (prompt) {
+      ensureNoPendingToolCalls(messages);
       messages.push(new HumanMessage(prompt));
     } else {
       return { goalId: goal.id, messages: [], status: 'complete' };
@@ -605,6 +629,7 @@ export class AgentWorker {
         }
       }
     } else if (prompt) {
+      ensureNoPendingToolCalls(messages);
       messages.push(new HumanMessage(prompt));
     } else {
       return { history: [], goalId, status: 'active' };
