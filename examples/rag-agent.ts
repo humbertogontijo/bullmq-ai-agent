@@ -1,12 +1,12 @@
 /**
- * Multi-agent example: Flight Finder + HR Assistant
+ * RAG example: one agent with a knowledge base (RAG), one goal.
  *
- * Two goals → orchestrator LLM routes each prompt to the right agent(s),
- * which run in parallel via BullMQ Flows.
- * Session persists across runs — restart and pick up where you left off.
- * Uses @clack/prompts and job progress (routing, thinking, typing, etc.).
+ * - Agent has RAG enabled (embedding + index). addDocument(agentId, source) loads from URL/file/text and indexes.
+ * - Worker injects a "retrieve" tool when the agent has RAG; the agent can query its knowledge base.
  *
- * Run: npx tsx examples/multi-agent.ts
+ * Run: npx tsx examples/rag-agent.ts
+ * Requires: Redis with RediSearch (e.g. Redis Stack), OPENAI_API_KEY, and @langchain/openai for embeddings.
+ *   Docker: docker run -d -p 6379:6379 redis/redis-stack
  */
 
 import * as p from '@clack/prompts';
@@ -24,64 +24,63 @@ import {
   printToolCalls,
   progressLabel,
 } from './utils/cli.js';
-import { bookFlight, bookPTO, checkPTO, searchFlights } from './utils/tools.js';
 
 const REDIS = { host: 'localhost', port: 6379 };
 
-// --- Define goals ---
-
-const flightGoal: AgentGoal = {
-  id: 'flight-booking',
-  name: 'Flight Finder',
-  title: 'Search and book flights to any destination',
+const goal: AgentGoal = {
+  id: 'qa',
+  name: 'Q&A',
+  title: 'Answer questions using your knowledge base',
   description:
-    'Help the user find and book flights. ' +
-    '1. Use SearchFlights to find available options. ' +
-    '2. Use BookFlight to book the chosen flight.',
-  tools: [searchFlights, bookFlight],
+    'Answer the user\'s questions. Use the retrieve tool to look up relevant context from your knowledge base before answering.',
+  tools: [],
 };
 
-const hrGoal: AgentGoal = {
-  id: 'hr-pto',
-  name: 'HR Assistant',
-  title: 'Check PTO balance and schedule time off',
-  description:
-    'Help with PTO management. ' +
-    '1. Use CheckPTO to look up available days. ' +
-    '2. Use BookPTO to schedule time off.',
-  tools: [checkPTO, bookPTO],
-};
-
-const AGENT_ID = 'example-agent';
-const exampleAgent: Agent = {
+const AGENT_ID = 'rag-agent';
+const agent: Agent = {
   id: AGENT_ID,
-  name: 'Example Agent',
+  name: 'RAG Agent',
+  rag: {
+    embedding: { provider: 'openai', model: 'text-embedding-3-small' },
+    topK: 4,
+  },
 };
-
-// --- Chat loop ---
 
 async function main() {
-  p.intro('Flight Finder + HR Assistant (multi-agent)');
+  p.intro('RAG Agent (knowledge base + retrieve tool)');
 
   const apiKey = await askApiKey();
 
   const worker = new AgentWorker({
     connection: REDIS,
     llmConfig: async () => ({ model: 'openai:gpt-4o', apiKey }),
-    getAgent: async (id) => (id === AGENT_ID ? exampleAgent : undefined),
-    goals: [flightGoal, hrGoal],
+    getAgent: async (id) => (id === AGENT_ID ? agent : undefined),
+    goals: [goal],
+    rag: { defaultEmbedding: { provider: 'openai', model: 'text-embedding-3-small' } },
   });
 
   const client = new AgentClient({ connection: REDIS });
 
   await worker.start();
 
-  const sessionId = 'example-session';
+  const sessionId = 'rag-example-session';
 
-  await client.setSessionConfig(sessionId, {
-    humanInTheLoop: true,
-    autoExecuteTools: false,
-  });
+  // Index some text so the agent has something to retrieve (client sends to worker; worker uses getAgent + rag config)
+  try {
+    await client.addDocument(AGENT_ID, {
+      type: 'text',
+      text: 'The bullmq-ai-agent library uses BullMQ for job queues and LangChain for the LLM and tools. Agents are dynamic and resolved by the worker via getAgent(agentId). Each agent can have a RAG knowledge base stored in Redis (RedisVectorStore). Goals are fixed objectives; multiple agents can share the same goals.',
+    });
+    p.log.success('Indexed sample document for the agent.');
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('FT.INFO') || msg.includes('RediSearch')) {
+      p.log.warn('RAG indexing needs Redis with RediSearch (e.g. Redis Stack). Use: docker run -d -p 6379:6379 redis/redis-stack');
+    } else {
+      p.log.warn('Could not index document (e.g. install @langchain/openai or use Redis Stack). Continuing anyway.');
+    }
+    p.log.message(msg);
+  }
 
   const history = await client.getConversationHistory(sessionId);
   if (history.length > 0) {
@@ -99,6 +98,7 @@ async function main() {
 
     let result = await client.sendPrompt(AGENT_ID, sessionId, input, {
       onProgress: (progress) => progressSpinner.message(progressLabel(progress)),
+      goalId: goal.id,
     });
 
     progressSpinner.stop('Done');

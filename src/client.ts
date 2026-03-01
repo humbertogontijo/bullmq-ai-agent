@@ -15,9 +15,12 @@ import {
 } from './sessionConfig.js';
 import type {
   AgentClientOptions,
+  DocumentJobData,
+  DocumentSource,
   JobProgress,
   JobRetention,
   JobType,
+  ModelClientOptions,
   OrchestratorJobData,
   PromptAttachment,
   ResumeCommand,
@@ -28,23 +31,33 @@ import {
   AGENT_QUEUE,
   AGGREGATOR_QUEUE,
   DEFAULT_JOB_RETENTION,
+  DOCUMENT_QUEUE,
   getQueueName,
   ORCHESTRATOR_QUEUE,
 } from './types.js';
 import { waitForJobWithProgress } from './waitWithProgress.js';
 
-export class AgentClient {
-  private readonly connection: ConnectionOptions;
-  private readonly queuePrefix: string;
-  private readonly orchestratorQueue: Queue;
-  private readonly aggregatorQueue: Queue;
-  private readonly orchestratorEvents: QueueEvents;
-  private readonly aggregatorEvents: QueueEvents;
-  private readonly agentEvents: QueueEvents;
-  private readonly retention: Required<JobRetention>;
-  private readonly keepResult: KeepJobs;
+// ---------------------------------------------------------------------------
+// ModelClient — session + prompt only (no agent)
+// ---------------------------------------------------------------------------
 
-  constructor(options: AgentClientOptions) {
+/**
+ * Client for sending prompts and managing sessions without the agent concept.
+ * Use this when you only need goals/tools and don't need per-agent RAG or agentId.
+ * For agent-aware flows (agentId, addDocument), use AgentClient.
+ */
+export class ModelClient {
+  protected readonly connection: ConnectionOptions;
+  protected readonly queuePrefix: string;
+  protected readonly orchestratorQueue: Queue;
+  protected readonly aggregatorQueue: Queue;
+  protected readonly orchestratorEvents: QueueEvents;
+  protected readonly aggregatorEvents: QueueEvents;
+  protected readonly agentEvents: QueueEvents;
+  protected readonly retention: Required<JobRetention>;
+  protected readonly keepResult: KeepJobs;
+
+  constructor(options: ModelClientOptions) {
     this.connection = options.connection;
     this.queuePrefix = options.queuePrefix ?? '';
     this.retention = { ...DEFAULT_JOB_RETENTION, ...options.jobRetention };
@@ -71,33 +84,23 @@ export class AgentClient {
   }
 
   /**
-   * Send a new user message. For human-in-the-loop (approve/reject tools or reply to
-   * human_in_the_loop), use sendCommand() instead.
-   * Uses session config for autoExecuteTools and humanInTheLoop (see setSessionConfig).
-   * Optionally pass sessionConfig here to override the stored session config for this request only.
+   * Send a new user message (no agent). For human-in-the-loop, use sendCommand() instead.
    */
   async sendPrompt(
     sessionId: string,
     prompt: string,
     options?: {
-      /** Optional attachments (e.g. images) to send with the prompt. */
       attachments?: PromptAttachment[];
       context?: Record<string, unknown>;
-      /** When set, use this goal only (no LLM routing). */
       goalId?: string;
-      /** Optional prefix messages for the conversation. */
       initialMessages?: SerializedMessage[];
-      /** Job priority (BullMQ: lower number = higher priority). */
       priority?: number;
-      /** Enforce a tool choice for this step (e.g. tool name, "auto", "any", "none"). */
       toolChoice?: string | Record<string, unknown> | 'auto' | 'any' | 'none';
-      /** Override session config for this request only (takes priority over Redis session config). */
       sessionConfig?: SessionConfig;
-      /** Called when the job reports progress (e.g. prompt-read, thinking, typing). Uses BullMQ job progress. */
       onProgress?: (progress: JobProgress) => void;
     },
   ): Promise<StepResult> {
-    const job = await this.addOrchestratorJob(sessionId, {
+    const job = await this.addOrchestratorJob(sessionId, undefined, {
       type: 'prompt',
       prompt,
       ...options,
@@ -106,28 +109,17 @@ export class AgentClient {
   }
 
   /**
-   * Resume after the agent returned status 'interrupted'.
-   *
-   * @example
-   * // Approve tools:
-   * sendCommand(sessionId, { type: 'tool_approval', approved: { SearchFlights: true } })
-   *
-   * // Tip the agent (agent formulates reply):
-   * sendCommand(sessionId, { type: 'hitl_response', response: 'The answer is 42' })
-   *
-   * // Reply as the agent directly (no model call):
-   * sendCommand(sessionId, { type: 'hitl_direct_reply', message: 'Here is the answer.' })
+   * Resume after status 'interrupted' (tool approval or human_in_the_loop).
    */
   async sendCommand(
     sessionId: string,
     command: ResumeCommand,
     options?: {
       context?: Record<string, unknown>;
-      /** Called when the job reports progress. */
       onProgress?: (progress: JobProgress) => void;
     },
   ): Promise<StepResult> {
-    const job = await this.addOrchestratorJob(sessionId, {
+    const job = await this.addOrchestratorJob(sessionId, undefined, {
       type: 'command',
       command,
       ...(options?.context !== undefined && { context: options.context }),
@@ -139,21 +131,13 @@ export class AgentClient {
     sessionId: string,
     context?: Record<string, unknown>,
   ): Promise<StepResult> {
-    const job = await this.addOrchestratorJob(sessionId, {
+    const job = await this.addOrchestratorJob(sessionId, undefined, {
       type: 'end-chat',
       context,
     });
     return this.resolveResult(job);
   }
 
-  // -----------------------------------------------------------------------
-  // Session config (autoExecuteTools, humanInTheLoop per session)
-  // -----------------------------------------------------------------------
-
-  /**
-   * Set config for a session. The worker reads this when processing jobs for the session.
-   * Call before or at the start of a conversation.
-   */
   async setSessionConfig(
     sessionId: string,
     config: SessionConfig,
@@ -162,22 +146,11 @@ export class AgentClient {
     await setSessionConfigStore(redis, this.queuePrefix, sessionId, config);
   }
 
-  /**
-   * Get current session config (defaults when not set).
-   */
   async getSessionConfig(sessionId: string): Promise<Required<SessionConfig>> {
     const redis = (await this.orchestratorQueue.client) as RedisLike;
     return getSessionConfigStore(redis, this.queuePrefix, sessionId);
   }
 
-  // -----------------------------------------------------------------------
-  // State queries
-  // -----------------------------------------------------------------------
-
-  /**
-   * Reconstruct the full conversation by fetching all step deltas
-   * from both orchestrator and aggregator queues via ZSCAN + pipelined HGET.
-   */
   async getConversationHistory(
     sessionId: string,
   ): Promise<SerializedMessage[]> {
@@ -189,10 +162,6 @@ export class AgentClient {
     return buildConversationHistory(orchResults, aggResults);
   }
 
-  // -----------------------------------------------------------------------
-  // Cleanup
-  // -----------------------------------------------------------------------
-
   async close(): Promise<void> {
     await this.orchestratorEvents.close();
     await this.aggregatorEvents.close();
@@ -201,12 +170,10 @@ export class AgentClient {
     await this.aggregatorQueue.close();
   }
 
-  // -----------------------------------------------------------------------
-  // Private helpers
-  // -----------------------------------------------------------------------
-
-  private async addOrchestratorJob(
+  /** Submit a job (used by AgentClient when wrapping with agentId). */
+  async addOrchestratorJob(
     sessionId: string,
+    agentId: string | undefined,
     extra: {
       type: JobType;
       prompt?: string;
@@ -228,14 +195,16 @@ export class AgentClient {
       removeOnFail: this.keepResult,
     };
     if (priority !== undefined) opts.priority = priority;
-    return this.orchestratorQueue.add(
-      'orchestrator-step',
-      { sessionId, ...jobData } satisfies OrchestratorJobData,
-      opts,
-    );
+    const data: OrchestratorJobData = {
+      sessionId,
+      ...(agentId !== undefined && { agentId }),
+      ...jobData,
+    };
+    return this.orchestratorQueue.add('orchestrator-step', data, opts);
   }
 
-  private async resolveResult(
+  /** Wait for job result (used by AgentClient when wrapping). */
+  async resolveResult(
     job: Job<OrchestratorJobData>,
     onProgress?: (progress: JobProgress) => void,
   ): Promise<StepResult> {
@@ -259,7 +228,7 @@ export class AgentClient {
     return result;
   }
 
-  private async waitForAggregator(
+  protected async waitForAggregator(
     aggregatorJobId: string,
     sessionId: string,
     onProgress?: (progress: JobProgress) => void,
@@ -289,8 +258,119 @@ export class AgentClient {
     );
     const result: StepResult =
       typeof rawResult === 'string' ? JSON.parse(rawResult) : rawResult;
-    // Aggregator return value is stored without childrenValues; expand from flow.
     const children = await aggJob.getChildrenValues<StepResult>();
     return expandAggregatorResult(result, children ?? {});
+  }
+}
+
+// ---------------------------------------------------------------------------
+// AgentClient — wraps ModelClient with agentId and addDocument
+// ---------------------------------------------------------------------------
+
+/**
+ * Agent-aware client. Wraps ModelClient with agentId on send methods and addDocument that sends the document to the worker (worker uses its getAgent and rag config to ingest).
+ */
+export class AgentClient {
+  private readonly modelClient: ModelClient;
+  private readonly documentQueue: Queue<DocumentJobData>;
+  private readonly documentEvents: QueueEvents;
+
+  constructor(options: AgentClientOptions) {
+    this.modelClient = new ModelClient(options);
+    const prefix = options.queuePrefix ?? '';
+    const docQueueName = getQueueName(prefix, DOCUMENT_QUEUE);
+    this.documentQueue = new Queue<DocumentJobData>(docQueueName, {
+      connection: options.connection,
+    });
+    this.documentEvents = new QueueEvents(docQueueName, {
+      connection: options.connection,
+    });
+  }
+
+  /** Send a new user message for the given agent. */
+  async sendPrompt(
+    agentId: string,
+    sessionId: string,
+    prompt: string,
+    options?: {
+      attachments?: PromptAttachment[];
+      context?: Record<string, unknown>;
+      goalId?: string;
+      initialMessages?: SerializedMessage[];
+      priority?: number;
+      toolChoice?: string | Record<string, unknown> | 'auto' | 'any' | 'none';
+      sessionConfig?: SessionConfig;
+      onProgress?: (progress: JobProgress) => void;
+    },
+  ): Promise<StepResult> {
+    const job = await this.modelClient.addOrchestratorJob(sessionId, agentId, {
+      type: 'prompt',
+      prompt,
+      ...options,
+    });
+    return this.modelClient.resolveResult(job, options?.onProgress);
+  }
+
+  /** Resume after status 'interrupted' for the given agent. */
+  async sendCommand(
+    agentId: string,
+    sessionId: string,
+    command: ResumeCommand,
+    options?: {
+      context?: Record<string, unknown>;
+      onProgress?: (progress: JobProgress) => void;
+    },
+  ): Promise<StepResult> {
+    const job = await this.modelClient.addOrchestratorJob(sessionId, agentId, {
+      type: 'command',
+      command,
+      ...(options?.context !== undefined && { context: options.context }),
+    });
+    return this.modelClient.resolveResult(job, options?.onProgress);
+  }
+
+  async endChat(
+    sessionId: string,
+    agentId: string,
+    context?: Record<string, unknown>,
+  ): Promise<StepResult> {
+    const job = await this.modelClient.addOrchestratorJob(sessionId, agentId, {
+      type: 'end-chat',
+      context,
+    });
+    return this.modelClient.resolveResult(job);
+  }
+
+  /** Send a document to the worker for ingestion into the agent's RAG index. The worker uses getAgent and rag config from its constructor. */
+  async addDocument(agentId: string, source: DocumentSource): Promise<void> {
+    const job = await this.documentQueue.add(
+      'add-document',
+      { agentId, source } satisfies DocumentJobData,
+      { jobId: `doc/${agentId}/${Date.now()}` },
+    );
+    await job.waitUntilFinished(this.documentEvents);
+  }
+
+  async setSessionConfig(
+    sessionId: string,
+    config: SessionConfig,
+  ): Promise<void> {
+    return this.modelClient.setSessionConfig(sessionId, config);
+  }
+
+  async getSessionConfig(sessionId: string): Promise<Required<SessionConfig>> {
+    return this.modelClient.getSessionConfig(sessionId);
+  }
+
+  async getConversationHistory(
+    sessionId: string,
+  ): Promise<SerializedMessage[]> {
+    return this.modelClient.getConversationHistory(sessionId);
+  }
+
+  async close(): Promise<void> {
+    await this.documentEvents.close();
+    await this.documentQueue.close();
+    return this.modelClient.close();
   }
 }

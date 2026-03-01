@@ -9,9 +9,8 @@ import {
   type HumanDirectReplyCommand,
   type HumanResponseCommand,
   type JobProgress,
-  type ResumeCommand,
   type SerializedMessage,
-  type StepResult,
+  type StepResult
 } from '../../src/index.js';
 
 const CONFIG_FILE = path.resolve(process.cwd(), '.agent.json');
@@ -38,14 +37,15 @@ export function progressLabel(progress: JobProgress): string {
 }
 
 export async function askApiKey(): Promise<string> {
-  const saved = loadConfig().apiKey;
-  if (saved) {
-    p.log.message('Using API key from .agent.json');
-    return saved;
-  }
-
   if (process.env.OPENAI_API_KEY) {
     return process.env.OPENAI_API_KEY;
+  }
+
+  const saved = loadConfig().apiKey;
+  if (saved) {
+    process.env.OPENAI_API_KEY = saved;
+    p.log.message('Using API key from .agent.json');
+    return saved;
   }
 
   const key = await p.text({

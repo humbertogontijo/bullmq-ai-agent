@@ -10,7 +10,7 @@
 
 import * as p from '@clack/prompts';
 
-import { AgentClient, AgentWorker, type AgentGoal, type AgentTool } from '../src/index.js';
+import { ModelClient, AgentWorker, type AgentGoal, type AgentTool } from '../src/index.js';
 import {
   askApiKey,
   askConfirm,
@@ -40,7 +40,7 @@ const flightGoal: AgentGoal = {
   tools: [searchFlights, bookFlight],
 };
 
-// --- Chat loop ---
+// --- Chat loop (ModelClient: no agent, just session + prompt) ---
 
 async function main() {
   p.intro('Flight Finder (single-agent)');
@@ -53,7 +53,7 @@ async function main() {
     goals: [flightGoal],
   });
 
-  const client = new AgentClient({ connection: REDIS });
+  const client = new ModelClient({ connection: REDIS });
 
   await worker.start();
 

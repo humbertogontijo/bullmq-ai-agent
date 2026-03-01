@@ -29,12 +29,15 @@ import {
 } from './prompts.js';
 import type {
   ActionRequest,
+  Agent,
   AgentChildJobData,
   AgentGoal,
   AgentTool,
   AgentWorkerLlmConfig,
   AgentWorkerLogger,
   AgentWorkerOptions,
+  DocumentJobData,
+  DocumentSource,
   JobProgress,
   JobType,
   OrchestratorJobData,
@@ -44,10 +47,15 @@ import type {
   StepResult,
   ToolApprovalDetail,
 } from './types.js';
+import { loadDocumentsFromSource } from './rag/loadDocument.js';
+import { splitDocuments } from './rag/splitDocuments.js';
+import { createRetrieveTool } from './rag/retrieveTool.js';
+import { createRedisClient, getVectorStore } from './rag/vectorStore.js';
 import { getSessionConfig, type SessionConfig } from './sessionConfig.js';
 import {
   AGENT_QUEUE,
   AGGREGATOR_QUEUE,
+  DOCUMENT_QUEUE,
   getQueueName,
   HUMAN_IN_THE_LOOP_TOOL_NAME,
   HUMAN_INPUT_TOOL_DEFINITION,
@@ -292,6 +300,9 @@ function buildHumanContent(
 
 interface GoalStepInput {
   goal: AgentGoal;
+  agent?: Agent;
+  /** When agent has RAG, the vector store to pass to the retrieve tool via context. */
+  ragVectorStore?: Awaited<ReturnType<typeof getVectorStore>>;
   sessionId: string;
   context?: Record<string, unknown>;
   initialMessages?: SerializedMessage[];
@@ -314,17 +325,27 @@ interface GoalStepInput {
 // AgentWorker
 // ---------------------------------------------------------------------------
 
+/** Cached RAG vector store and redis client to close on worker close. */
+interface RAGCacheEntry {
+  store: Awaited<ReturnType<typeof getVectorStore>>;
+  createdClient?: Awaited<ReturnType<typeof createRedisClient>>;
+}
+
 export class AgentWorker {
   private readonly connection: ConnectionOptions;
   private readonly llmConfig: AgentWorkerLlmConfig;
+  private readonly getAgent?: (agentId: string) => Promise<Agent | undefined>;
   private readonly goals: Map<string, AgentGoal>;
   private readonly multiGoalMode: boolean;
   private readonly queuePrefix: string;
   private readonly logger?: AgentWorkerLogger;
+  private readonly ragOptions?: AgentWorkerOptions['rag'];
+  private readonly ragCache = new Map<string, RAGCacheEntry>();
 
   private orchestratorWorker!: Worker;
   private agentWorkerInstance!: Worker;
   private aggregatorWorker!: Worker;
+  private documentWorker!: Worker<DocumentJobData>;
   private flowProducer!: FlowProducer;
   private orchestratorQueue!: Queue;
   private aggregatorQueue!: Queue;
@@ -338,10 +359,12 @@ export class AgentWorker {
       );
     }
     this.llmConfig = options.llmConfig;
+    this.getAgent = options.getAgent;
     this.goals = new Map(options.goals.map((g) => [g.id, g]));
     this.multiGoalMode = options.goals.length > 1;
     this.queuePrefix = options.queuePrefix ?? '';
     this.logger = options.logger;
+    this.ragOptions = options.rag;
   }
 
   async start(): Promise<void> {
@@ -386,13 +409,71 @@ export class AgentWorker {
       withErrorLog('aggregator', (job) => this.processAggregator(job)),
       { connection: this.connection },
     );
+
+    if (this.getAgent) {
+      const docQueue = getQueueName(this.queuePrefix, DOCUMENT_QUEUE);
+      this.documentWorker = new Worker<DocumentJobData>(
+        docQueue,
+        withErrorLog('document', (job) => this.processDocumentJob(job)),
+        { connection: this.connection },
+      );
+    }
+  }
+
+  private async processDocumentJob(job: Job<DocumentJobData>): Promise<void> {
+    const { agentId, source } = job.data;
+    if (!this.getAgent) {
+      throw new Error('Document job requires getAgent in AgentWorkerOptions.');
+    }
+    const agent = await this.getAgent(agentId);
+    if (!agent) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+    const embedding = agent.rag?.embedding ?? this.ragOptions?.defaultEmbedding;
+    if (!embedding) {
+      throw new Error(
+        `Agent ${agentId} has no RAG embedding. Set agent.rag.embedding or rag.defaultEmbedding in AgentWorkerOptions.`,
+      );
+    }
+    await this.ingestDocuments(agentId, source, embedding, agent.rag?.indexName);
+  }
+
+  /** Load, split, embed, and store documents. Uses a dedicated redis client that is closed after use. */
+  private async ingestDocuments(
+    agentId: string,
+    source: DocumentSource,
+    embedding: import('./types.js').EmbeddingConfig,
+    indexName?: string,
+  ): Promise<void> {
+    const documents = await loadDocumentsFromSource(source);
+    const splits = await splitDocuments(documents);
+    const redisClient = await createRedisClient(this.connection);
+    try {
+      const store = await getVectorStore({
+        redisClient,
+        queuePrefix: this.queuePrefix,
+        agentId,
+        embedding,
+        indexName,
+      });
+      await store.addDocuments(splits);
+    } finally {
+      await redisClient.quit();
+    }
   }
 
   async close(): Promise<void> {
+    await Promise.all(
+      [...this.ragCache.values()]
+        .map((e) => e.createdClient?.quit())
+        .filter(Boolean),
+    );
+    this.ragCache.clear();
     await Promise.all([
       this.orchestratorWorker?.close(),
       this.agentWorkerInstance?.close(),
       this.aggregatorWorker?.close(),
+      this.documentWorker?.close(),
       this.flowProducer?.close(),
       this.orchestratorQueue?.close(),
       this.aggregatorQueue?.close(),
@@ -435,7 +516,19 @@ export class AgentWorker {
   private async processOrchestrator(
     job: Job<OrchestratorJobData>,
   ): Promise<StepResult> {
-    const { sessionId, type, prompt } = job.data;
+    const { sessionId, agentId, type, prompt } = job.data;
+
+    if (agentId != null && (this.getAgent == null || typeof this.getAgent !== 'function')) {
+      this.logger?.error('Job has agentId but worker getAgent is not configured');
+      return { history: [], agentId, status: 'active' };
+    }
+
+    const agent: Agent | undefined =
+      agentId != null ? await this.getAgent!(agentId) ?? undefined : undefined;
+    if (agentId != null && agent == null) {
+      this.logger?.error(`Agent not found: ${agentId}`);
+      return { history: [], agentId, status: 'active' };
+    }
 
     await job.updateProgress({
       phase: 'prompt-read',
@@ -447,9 +540,9 @@ export class AgentWorker {
     const requestOverride = job.data.sessionConfig;
     const sessionConfig: Required<SessionConfig> = requestOverride
       ? {
-          autoExecuteTools: requestOverride.autoExecuteTools ?? fromRedis.autoExecuteTools,
-          humanInTheLoop: requestOverride.humanInTheLoop ?? fromRedis.humanInTheLoop,
-        }
+        autoExecuteTools: requestOverride.autoExecuteTools ?? fromRedis.autoExecuteTools,
+        humanInTheLoop: requestOverride.humanInTheLoop ?? fromRedis.humanInTheLoop,
+      }
       : fromRedis;
 
     const prevState = await findLatestResult(
@@ -461,6 +554,7 @@ export class AgentWorker {
     if (type === 'end-chat') {
       return {
         history: [],
+        agentId,
         goalId: prevState?.goalId,
         status: 'ended',
       };
@@ -468,13 +562,19 @@ export class AgentWorker {
 
     if (type === 'command') {
       const command = job.data.command;
-      if (!command) return { history: [], goalId: prevState?.goalId, status: 'active' };
+      if (!command) return { history: [], agentId, goalId: prevState?.goalId, status: 'active' };
 
       // Single-goal: process resume in single-goal step
       if (!this.multiGoalMode || job.data.goalId) {
-        const singleGoalId =
-          job.data.goalId ?? prevState?.goalId ?? [...this.goals.keys()][0];
-        return this.processSingleGoalStep(job, singleGoalId, type, prompt, prevState, sessionConfig);
+        const singleGoalId = job.data.goalId ?? prevState?.goalId;
+        if (!singleGoalId || !this.goals.has(singleGoalId)) {
+          return {
+            history: [{ role: 'ai', content: "Couldn't find a goal for that request." }],
+            agentId,
+            status: 'active',
+          };
+        }
+        return this.processSingleGoalStep(job, agent, singleGoalId, type, prompt, prevState, sessionConfig);
       }
 
       // Multi-goal: tool_approval for interrupted agents
@@ -487,8 +587,8 @@ export class AgentWorker {
           ([, r]) => r.status === 'interrupted',
         );
         if (awaitingAgents.length > 0) {
-          const routingJobId = await this.createConfirmFlow(job, awaitingAgents, sessionConfig);
-          return { history: [], status: 'routing', routingJobId };
+          const routingJobId = await this.createConfirmFlow(job, agentId, awaitingAgents, sessionConfig);
+          return { history: [], agentId, status: 'routing', routingJobId };
         }
       }
 
@@ -504,31 +604,38 @@ export class AgentWorker {
         if (humanInterrupt?.goalId && humanAction) {
           const routingJobId = await this.createHumanInputResponseFlow(
             job,
+            agentId,
             humanInterrupt.goalId,
             humanAction.id,
             command,
             humanInterrupt.pendingMessages,
             sessionConfig,
           );
-          return { history: [], status: 'routing', routingJobId };
+          return { history: [], agentId, status: 'routing', routingJobId };
         }
       }
 
-      return { history: [], goalId: prevState?.goalId, status: 'active' };
+      return { history: [], agentId, goalId: prevState?.goalId, status: 'active' };
     }
 
     // Single-goal mode, or explicit goalId
     if (!this.multiGoalMode || job.data.goalId) {
-      const singleGoalId =
-        job.data.goalId ?? prevState?.goalId ?? [...this.goals.keys()][0];
-      return this.processSingleGoalStep(job, singleGoalId, type, prompt, prevState, sessionConfig);
+      const singleGoalId = job.data.goalId ?? prevState?.goalId;
+      if (!singleGoalId || !this.goals.has(singleGoalId)) {
+        return {
+          history: [{ role: 'ai', content: "Couldn't find a goal for that request." }],
+          agentId,
+          status: 'active',
+        };
+      }
+      return this.processSingleGoalStep(job, agent, singleGoalId, type, prompt, prevState, sessionConfig);
     }
 
     // Multi-goal mode (routing)
     if (type === 'prompt') {
       await job.updateProgress({ phase: 'routing', sessionId });
       const promptText = job.data.prompt ?? '';
-      const agentIds = await this.routeToAgents(
+      const goalIds = await this.routeToGoals(
         promptText,
         prevState?.childrenValues
           ? deriveRoutingHistory(prevState.childrenValues)
@@ -537,26 +644,28 @@ export class AgentWorker {
       );
       const routingJobId = await this.createAgentFlow(
         job,
-        agentIds,
+        agentId ?? undefined,
+        goalIds,
         promptText,
         sessionConfig,
       );
       const hasContent = promptText || job.data.attachments?.length;
       const historyEntry: SerializedMessage | undefined = hasContent
         ? {
-            role: 'human' as const,
-            content: promptText,
-            ...(job.data.attachments?.length && { attachments: job.data.attachments }),
-          }
+          role: 'human' as const,
+          content: promptText,
+          ...(job.data.attachments?.length && { attachments: job.data.attachments }),
+        }
         : undefined;
       return {
         history: historyEntry ? [historyEntry] : [],
+        agentId,
         status: 'routing',
         routingJobId,
       };
     }
 
-    return { history: [], status: 'active' };
+    return { history: [], agentId, status: 'active' };
   }
 
   // -----------------------------------------------------------------------
@@ -567,13 +676,28 @@ export class AgentWorker {
     job: Job<AgentChildJobData>,
   ): Promise<StepResult> {
     const {
-      sessionId, goalId, prompt, toolCalls, context, initialMessages,
+      sessionId, agentId, goalId, prompt, toolCalls, context, initialMessages,
       toolChoice, autoExecuteTools, humanInTheLoop, resume, humanInputToolCallId, pendingMessages,
     } = job.data;
+
+    let agent: Agent | undefined;
+    if (agentId != null && this.getAgent) {
+      agent = (await this.getAgent(agentId)) ?? undefined;
+      if (!agent) {
+        this.logger?.error(`Agent not found: ${agentId}`);
+        return { agentId, goalId, history: [], status: 'active' };
+      }
+    } else {
+      agent = undefined;
+    }
+
     const goal = this.goals.get(goalId);
     if (!goal) {
-      return { goalId, history: [], status: 'active' };
+      return { agentId, goalId, history: [], status: 'active' };
     }
+
+    const ragVectorStore =
+      agent != null && agentId != null ? await this.getOrCreateRAGStore(agentId, agent) : undefined;
 
     const actionRequests = toolCalls?.map((tc) => ({
       id: tc.id,
@@ -582,8 +706,10 @@ export class AgentWorker {
       description: '',
     }));
 
-    return this.resolveGoalStep({
+    const result = await this.resolveGoalStep({
       goal,
+      agent,
+      ragVectorStore,
       sessionId,
       context,
       initialMessages,
@@ -598,6 +724,7 @@ export class AgentWorker {
       humanInTheLoop: humanInTheLoop === true,
       onProgress: (progress) => job.updateProgress({ ...progress, sessionId, goalId }),
     });
+    return { ...result, agentId, goalId };
   }
 
   // -----------------------------------------------------------------------
@@ -606,14 +733,26 @@ export class AgentWorker {
 
   private async resolveGoalStep(input: GoalStepInput): Promise<StepResult> {
     const {
-      goal, sessionId, context, initialMessages,
+      goal, agent, ragVectorStore, sessionId, context, initialMessages,
       prompt, attachments, command, actionRequests, humanInputToolCallId, pendingMessages,
       toolChoice, autoExecuteTools, humanInTheLoop = false, onProgress,
     } = input;
 
+    let tools: AgentTool[] = [...goal.tools];
+    if (agent?.rag && ragVectorStore) {
+      tools.push(
+        createRetrieveTool({
+          topK: agent.rag.topK ?? 4,
+          name: agent.rag.retrieveToolName,
+        }) as unknown as AgentTool,
+      );
+    }
+    const toolContext =
+      ragVectorStore != null ? { ...context, ragVectorStore } : context;
+
     const model = await this.createLLM(
-      toToolDefinitions(goal.tools, humanInTheLoop),
-      { goalId: goal.id, context },
+      toToolDefinitions(tools, humanInTheLoop),
+      { goalId: goal.id, context: toolContext },
     );
 
     const messages: BaseMessage[] = [
@@ -644,6 +783,7 @@ export class AgentWorker {
           if (humanInputToolCallId) {
             const { message } = command.payload;
             return {
+              agentId: agent?.id,
               goalId: goal.id,
               history: serializeMessages([new AIMessage({ content: message })]),
               status: 'active',
@@ -676,7 +816,7 @@ export class AgentWorker {
               stripTrailingToolCalls(messages);
               messages.push(...deserializeMessages(pendingMessages));
             }
-            const toolMessages = await processToolApproval(command, actionRequests, goal.tools, context);
+            const toolMessages = await processToolApproval(command, actionRequests, tools, toolContext);
             messages.push(...toolMessages);
           }
           break;
@@ -686,11 +826,11 @@ export class AgentWorker {
       stripTrailingToolCalls(messages);
       messages.push(new HumanMessage(buildHumanContent(prompt ?? '', attachments)));
     } else {
-      return { goalId: goal.id, history: [], status: 'active' };
+      return { agentId: agent?.id, goalId: goal.id, history: [], status: 'active' };
     }
 
     return this.runAgentLoop(
-      goal, model, messages, restoredCount, context, toolChoice, autoExecuteTools, onProgress,
+      goal, model, messages, restoredCount, toolContext, toolChoice, autoExecuteTools, onProgress, tools,
     );
   }
 
@@ -707,6 +847,7 @@ export class AgentWorker {
     toolChoice?: string | Record<string, unknown> | 'auto' | 'any' | 'none',
     autoExecuteTools = false,
     onProgress?: (progress: JobProgress) => void,
+    tools: AgentTool[] = goal.tools,
     maxRounds = 5,
   ): Promise<StepResult> {
     let rounds = 0;
@@ -774,7 +915,7 @@ export class AgentWorker {
       for (const tc of response.tool_calls) {
         onProgress?.({ phase: 'executing-tool', toolName: tc.name });
         messages.push(
-          await executeToolHandler(tc.name, tc.id ?? '', tc.args as Record<string, unknown>, goal.tools, context),
+          await executeToolHandler(tc.name, tc.id ?? '', tc.args as Record<string, unknown>, tools, context),
         );
       }
     }
@@ -825,8 +966,30 @@ export class AgentWorker {
   // Single-goal mode (thin wrapper around resolveGoalStep)
   // -----------------------------------------------------------------------
 
+  private async getOrCreateRAGStore(agentId: string, agent: Agent): Promise<Awaited<ReturnType<typeof getVectorStore>> | undefined> {
+    if (!agent.rag) return undefined;
+    const embeddingConfig = agent.rag.embedding ?? this.ragOptions?.defaultEmbedding;
+    if (!embeddingConfig) return undefined;
+
+    let entry = this.ragCache.get(agentId);
+    if (!entry) {
+      const redisClient = await createRedisClient(this.connection);
+      const store = await getVectorStore({
+        redisClient,
+        queuePrefix: this.queuePrefix,
+        agentId,
+        embedding: embeddingConfig,
+        indexName: agent.rag?.indexName,
+      });
+      this.ragCache.set(agentId, { store, createdClient: redisClient });
+      entry = { store, createdClient: redisClient };
+    }
+    return entry.store;
+  }
+
   private async processSingleGoalStep(
     job: Job<OrchestratorJobData>,
+    agent: Agent | undefined,
     goalId: string,
     type: JobType,
     prompt: string | undefined,
@@ -835,8 +998,12 @@ export class AgentWorker {
   ): Promise<StepResult> {
     const goal = this.goals.get(goalId);
     if (!goal) {
-      return { history: [], goalId, status: 'active' };
+      return { history: [], agentId: agent?.id, goalId, status: 'active' };
     }
+
+    const agentId = job.data.agentId;
+    const ragVectorStore =
+      agent != null && agentId != null ? await this.getOrCreateRAGStore(agentId, agent) : undefined;
 
     const { sessionId, context, initialMessages, toolChoice } = job.data;
     const command = job.data.command;
@@ -852,6 +1019,8 @@ export class AgentWorker {
 
       result = await this.resolveGoalStep({
         goal,
+        agent,
+        ragVectorStore,
         sessionId,
         context,
         initialMessages,
@@ -867,6 +1036,8 @@ export class AgentWorker {
     } else if (type === 'prompt' && (prompt !== undefined || job.data.attachments?.length)) {
       result = await this.resolveGoalStep({
         goal,
+        agent,
+        ragVectorStore,
         sessionId,
         context,
         initialMessages,
@@ -878,7 +1049,7 @@ export class AgentWorker {
         onProgress,
       });
     } else {
-      return { history: [], goalId, status: 'active' };
+      return { history: [], agentId: agent?.id, goalId, status: 'active' };
     }
 
     // When interrupting for human_in_the_loop, don't persist the AIMessage (to avoid orphan
@@ -896,14 +1067,14 @@ export class AgentWorker {
       };
     }
 
-    return result;
+    return { ...result, agentId: agent?.id };
   }
 
   // -----------------------------------------------------------------------
   // Multi-goal helpers
   // -----------------------------------------------------------------------
 
-  private async routeToAgents(
+  private async routeToGoals(
     prompt: string,
     history: SerializedMessage[],
     context?: Record<string, unknown>,
@@ -939,7 +1110,8 @@ export class AgentWorker {
 
   private async createAgentFlow(
     orchestratorJob: Job<OrchestratorJobData>,
-    agentIds: string[],
+    agentId: string | undefined,
+    goalIds: string[],
     prompt: string,
     sessionConfig: Required<SessionConfig>,
   ): Promise<string> {
@@ -959,11 +1131,12 @@ export class AgentWorker {
         removeOnComplete,
         removeOnFail,
       },
-      children: agentIds.map((goalId) => ({
+      children: goalIds.map((goalId) => ({
         name: getJobNameFromGoalId(goalId),
         queueName: agentQueue,
         data: {
           sessionId,
+          ...(agentId !== undefined && { agentId }),
           goalId,
           prompt,
           autoExecuteTools: sessionConfig.autoExecuteTools,
@@ -988,6 +1161,7 @@ export class AgentWorker {
 
   private async createConfirmFlow(
     orchestratorJob: Job<OrchestratorJobData>,
+    agentId: string | undefined,
     awaitingAgents: [string, StepResult][],
     sessionConfig: Required<SessionConfig>,
   ): Promise<string> {
@@ -1015,6 +1189,7 @@ export class AgentWorker {
           queueName: agentQueue,
           data: {
             sessionId,
+            ...(agentId !== undefined && { agentId }),
             goalId,
             toolCalls: deriveToolCalls(result.history, goalId),
             autoExecuteTools: sessionConfig.autoExecuteTools,
@@ -1040,6 +1215,7 @@ export class AgentWorker {
 
   private async createHumanInputResponseFlow(
     orchestratorJob: Job<OrchestratorJobData>,
+    agentId: string | undefined,
     goalId: string,
     humanInputToolCallId: string,
     command: ResumeCommand,
@@ -1068,6 +1244,7 @@ export class AgentWorker {
           queueName: agentQueue,
           data: {
             sessionId,
+            ...(agentId !== undefined && { agentId }),
             goalId,
             resume: command,
             humanInputToolCallId,

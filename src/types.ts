@@ -25,6 +25,36 @@ export interface AgentGoal {
 }
 
 // ---------------------------------------------------------------------------
+// RAG & Agent (per-agent knowledge; goals are objectives)
+// ---------------------------------------------------------------------------
+
+/** Embedding provider config for RAG. Used for indexing and retrieval. */
+export type EmbeddingConfig =
+  | { provider: 'openai'; model?: string; apiKey?: string }
+  | { provider: 'cohere'; model?: string; apiKey?: string };
+
+/** Per-agent RAG config (index, embedding, topK). */
+export interface RAGConfig {
+  embedding?: EmbeddingConfig;
+  indexName?: string;
+  topK?: number;
+  retrieveToolName?: string;
+}
+
+/** Agent = individual with optional knowledge (RAG). Goals are objectives; tools come from the goal. An agent can execute any goal defined on the worker (or the goal specified on the job). */
+export interface Agent {
+  id: string;
+  name?: string;
+  rag?: RAGConfig;
+}
+
+/** Source for addDocument: URL, file path, or raw text. */
+export type DocumentSource =
+  | { type: 'url'; url: string; metadata?: Record<string, unknown> }
+  | { type: 'file'; path: string; metadata?: Record<string, unknown> }
+  | { type: 'text'; text: string; metadata?: Record<string, unknown> };
+
+// ---------------------------------------------------------------------------
 // Attachments (multimodal prompt content)
 // ---------------------------------------------------------------------------
 
@@ -115,6 +145,8 @@ export interface Interrupt {
   /** Discriminator: 'tool_approval' for pending tool calls, 'human_input' for operator requests. */
   type: InterruptType;
   actionRequests: ActionRequest[];
+  /** Agent id (session is for this agent). */
+  agentId?: string;
   /** Goal id (always present in multi-goal mode). */
   goalId?: string;
   /**
@@ -182,6 +214,8 @@ export type ResumeCommand = ToolApprovalCommand | HumanResponseCommand | HumanDi
 /** Data for orchestrator / single-agent queue jobs (created by the client). */
 export interface OrchestratorJobData {
   sessionId: string;
+  /** When set, worker resolves agent via getAgent and can use RAG. Omit for model-only (no agent). */
+  agentId?: string;
   type: JobType;
   prompt?: string;
   /** Optional attachments (e.g. images) for the user message when type === 'prompt'. */
@@ -214,6 +248,8 @@ export interface OrchestratorJobData {
 /** Data for per-agent child jobs (created by the orchestrator worker). */
 export interface AgentChildJobData {
   sessionId: string;
+  /** When set, worker resolves agent and can use RAG. Omit for model-only runs. */
+  agentId?: string;
   goalId: string;
   prompt?: string;
   /** Optional attachments for the user message (passed from orchestrator job). */
@@ -238,6 +274,12 @@ export interface AgentChildJobData {
   humanInTheLoop?: boolean;
 }
 
+/** Data for add-document jobs (client enqueues; worker processes using getAgent + rag config). */
+export interface DocumentJobData {
+  agentId: string;
+  source: DocumentSource;
+}
+
 // ---------------------------------------------------------------------------
 // Job result types
 // ---------------------------------------------------------------------------
@@ -255,6 +297,7 @@ export interface AgentChildJobData {
 export interface StepResult {
   /** New messages produced during this step only (delta, not cumulative). */
   history: SerializedMessage[];
+  agentId?: string;
   goalId?: string;
   status: 'active' | 'interrupted' | 'ended' | 'routing';
   /** Set when status is 'routing' — the aggregator job ID to follow. */
@@ -330,16 +373,25 @@ export interface AgentWorkerOptions {
    * to langchain's `initChatModel`. Use for per-job, per-goal, or static LLM config.
    */
   llmConfig: AgentWorkerLlmConfig;
+  /** When provided, jobs with agentId resolve agent config (e.g. RAG). Omit for model-only (no agents). */
+  getAgent?: (agentId: string) => Promise<Agent | undefined>;
+  /** Fixed list of goals (objectives). Agents can execute any of these goals. */
   goals: AgentGoal[];
+  /** Optional default embedding for agents that have rag but no embedding. */
+  rag?: { defaultEmbedding?: EmbeddingConfig };
 }
 
-export interface AgentClientOptions {
+/** Options for ModelClient (no agent; session + prompt only). */
+export interface ModelClientOptions {
   connection: ConnectionOptions;
   /** How long to keep completed/failed result jobs in Redis. */
   jobRetention?: JobRetention;
   /** Optional prefix for queue names. Must match the worker's queuePrefix. */
   queuePrefix?: string;
 }
+
+/** Options for AgentClient (adds agentId to send methods and addDocument that sends to worker). Extends ModelClientOptions. */
+export interface AgentClientOptions extends ModelClientOptions {}
 
 // ---------------------------------------------------------------------------
 // Job progress (BullMQ job.updateProgress payload)
@@ -379,6 +431,7 @@ export interface AgentResponseEvent {
 export const ORCHESTRATOR_QUEUE = 'agent-orchestrator';
 export const AGENT_QUEUE = 'agent-worker';
 export const AGGREGATOR_QUEUE = 'agent-aggregator';
+export const DOCUMENT_QUEUE = 'agent-document';
 
 /** Resolve queue name with optional prefix (default empty for backward compatibility). */
 export function getQueueName(prefix: string | undefined, base: string): string {

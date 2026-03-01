@@ -45,6 +45,21 @@ Define goals and tools, connect any LLM, and let BullMQ handle the rest — para
 
 **Multi-agent mode:** An LLM-powered router selects which agents should handle the request. Selected agents run in parallel as BullMQ child jobs, and an aggregator collects their results.
 
+### Agents and goals
+
+- **Agent** — An individual with an identity and optional **knowledge base** (RAG). Identified by `agentId`. Agents are **dynamic**: the worker resolves them at runtime via `getAgent(agentId)` (e.g. from a DB or Redis). An agent can execute any goal defined on the worker (or the goal specified on the job).
+- **Goal** — An objective (id, name, description, tools, system message). Goals are fixed on the worker; multiple agents can share the same goals. Tools and system prompts come from the goal.
+
+Sessions are tied to an agent when using AgentClient: you pass `sessionId` and `agentId`. The worker loads the agent with `getAgent(agentId)` and runs the selected goal(s).
+
+### RAG (Retrieval Augmented Generation)
+
+When an agent has `rag` config, the worker injects a **retrieve** tool so the model can query the agent's knowledge base. Documents are stored per agent in **RedisVectorStore** (index name: `rag:{queuePrefix}:agent:{agentId}`). **Redis must have RediSearch** (e.g. [Redis Stack](https://redis.io/docs/stack/)); plain Redis is not enough. Example: `docker run -d -p 6379:6379 redis/redis-stack`.
+
+- **Adding documents:** Use `client.addDocument(agentId, source)` with `source` = `{ type: 'url', url }`, `{ type: 'file', path }`, or `{ type: 'text', text }`. The client loads, chunks, embeds, and stores internally. Provide embedding via `rag.defaultEmbedding` in `AgentClientOptions` or pass `{ embedding, indexName? }` per call. Agent resolution is only on the worker (for running jobs).
+- **Embeddings:** Configure per agent (`agent.rag.embedding`) or set a worker/client default (`rag.defaultEmbedding`). Supported providers: `openai`, `cohere` (install `@langchain/openai` or `@langchain/cohere`).
+- **Example:** `examples/rag-agent.ts` — one agent with RAG, indexed text, and questions answered via the retrieve tool.
+
 ## Installation
 
 ```bash
@@ -115,6 +130,8 @@ const flightGoal: AgentGoal = {
 
 ### 3. Start the Worker
 
+Without agents you only need goals. With agents, add `getAgent(agentId)` so the worker can load agent config (and RAG) at runtime.
+
 ```typescript
 import { AgentWorker } from 'bullmq-ai-agent';
 
@@ -130,12 +147,14 @@ const worker = new AgentWorker({
 await worker.start();
 ```
 
-### 4. Chat with the Agent
+### 4. Chat with the model (ModelClient) or an agent (AgentClient)
+
+Use **ModelClient** when you don't need agents or RAG — just session + prompt + goals:
 
 ```typescript
-import { AgentClient } from 'bullmq-ai-agent';
+import { ModelClient } from 'bullmq-ai-agent';
 
-const client = new AgentClient({
+const client = new ModelClient({
   connection: { host: 'localhost', port: 6379 },
 });
 
@@ -147,7 +166,7 @@ await client.setSessionConfig(sessionId, {
   autoExecuteTools: false // Require user confirmation before running tools
 });
 
-// Send a prompt (optionally with progress callback)
+// Send a prompt (no agentId with ModelClient)
 let result = await client.sendPrompt(sessionId, 'Find flights from SFO to JFK on March 15', {
   onProgress: (p) => console.log(p.phase), // 'prompt-read' | 'thinking' | 'typing' | ...
 });
@@ -157,31 +176,37 @@ if (result.status === 'interrupted' && result.interrupts?.length) {
   const interrupt = result.interrupts[0];
 
   if (interrupt.type === 'human_input') {
-    // Operator tips the agent (agent formulates reply from the tip):
     result = await client.sendCommand(sessionId, {
       type: 'hitl_response',
-      response: 'User said: yes, proceed',
+      payload: { message: 'User said: yes, proceed' },
     });
-
-    // Or operator sends a reply directly as the agent (no model call):
-    result = await client.sendCommand(sessionId, {
-      type: 'hitl_direct_reply',
-      message: 'Here is the answer.',
-    });
+    // Or: client.sendCommand(sessionId, { type: 'hitl_direct_reply', payload: { message: '...' } });
   } else {
-    // Approve or reject pending tool calls:
     const approved = Object.fromEntries(
       interrupt.actionRequests.map((a) => [a.name, true]),
     );
     result = await client.sendCommand(sessionId, {
       type: 'tool_approval',
-      approved,
+      payload: { approved },
     });
   }
 }
 
 // Retrieve full conversation history (survives restarts)
 const history = await client.getConversationHistory(sessionId);
+```
+
+Use **AgentClient** when you need per-agent identity, RAG, or `addDocument(agentId, source)`. It wraps the same queues but adds `agentId` to every send and exposes `addDocument`:
+
+```typescript
+import { AgentClient } from 'bullmq-ai-agent';
+
+const client = new AgentClient({
+  connection: { host: 'localhost', port: 6379 },
+  rag: { defaultEmbedding: { provider: 'openai' } },
+});
+await client.sendPrompt('my-agent', sessionId, prompt, options);
+await client.addDocument('my-agent', { type: 'text', text: '...' });
 ```
 
 ## Multi-Agent Mode
@@ -195,6 +220,7 @@ const worker = new AgentWorker({
     model: 'openai:gpt-4o',
     apiKey: process.env.OPENAI_API_KEY,
   }),
+  getAgent: async (id) => (id === 'my-agent' ? { id: 'my-agent' } : null),
   goals: [flightGoal, hrGoal, expenseGoal], // 2+ goals enables multi-agent mode
 });
 ```
@@ -216,7 +242,9 @@ new AgentWorker(options: AgentWorkerOptions)
 | ------------------- | ------------------- | ----------------------------------------------------------------- |
 | `connection`        | `ConnectionOptions` | Redis connection (from BullMQ)                                    |
 | `llmConfig`        | `(options) => Promise<AgentWorkerLlmConfigData>` | Called each step; return config for `initChatModel` (model, apiKey, etc.) |
-| `goals`             | `AgentGoal[]`       | One or more agent goals with tools                                |
+| `getAgent`          | `(agentId) => Promise<Agent \| null>` | Resolve agent config at runtime (required)                        |
+| `goals`             | `AgentGoal[]`       | Fixed list of goals; agents can execute any of them               |
+| `rag`               | `{ defaultEmbedding?: EmbeddingConfig }?` | Default embedding for agents with RAG but no own embedding        |
 
 `humanInTheLoop` and `autoExecuteTools` are configured **per session** via `client.setSessionConfig(sessionId, config)` (see below).
 
@@ -226,9 +254,25 @@ new AgentWorker(options: AgentWorkerOptions)
 - `start(): Promise<void>` — Start processing jobs
 - `close(): Promise<void>` — Gracefully shut down all workers
 
+### `ModelClient`
+
+Session + prompt only (no agent). Use when you don't need agentId or RAG.
+
+```typescript
+new ModelClient(options: ModelClientOptions)
+```
+
+| Option         | Type                | Description                                              |
+| -------------- | ------------------- | -------------------------------------------------------- |
+| `connection`   | `ConnectionOptions` | Redis connection (from BullMQ)                           |
+| `jobRetention` | `JobRetention?`     | How long to keep completed jobs (default: 1h / 200 jobs) |
+| `queuePrefix`  | `string?`           | Must match the worker's queuePrefix                      |
+
+**Methods:** `sendPrompt(sessionId, prompt, options?)`, `sendCommand(sessionId, command, options?)`, `endChat(sessionId, context?)`, `setSessionConfig`, `getSessionConfig`, `getConversationHistory`, `close`.
+
 ### `AgentClient`
 
-The client-side component for sending prompts and managing sessions.
+Wraps model behaviour with agent identity and RAG. Use when you need agentId or addDocument.
 
 ```typescript
 new AgentClient(options: AgentClientOptions)
@@ -239,18 +283,20 @@ new AgentClient(options: AgentClientOptions)
 | -------------- | ------------------- | -------------------------------------------------------- |
 | `connection`   | `ConnectionOptions` | Redis connection (from BullMQ)                           |
 | `jobRetention` | `JobRetention?`     | How long to keep completed jobs (default: 1h / 200 jobs) |
+| `rag`          | `{ defaultEmbedding?: EmbeddingConfig; defaultIndexName?: string }?` | Default embedding (and optional index name) for `addDocument`; or pass per call |
 
 
 **Methods:**
 
 - `setSessionConfig(sessionId, config): Promise<void>` — Set config for a session. `config: { humanInTheLoop?: boolean, autoExecuteTools?: boolean }`. Call before or at the start of a conversation. The worker reads this when processing jobs for the session.
 - `getSessionConfig(sessionId): Promise<Required<SessionConfig>>` — Get current session config (returns defaults when not set).
-- `sendPrompt(sessionId, prompt, options?): Promise<StepResult>` — Send a new user message. Options: `attachments` (images, video, audio, or documents — see type `PromptAttachment`), `goalId`, `context`, `initialMessages`, `priority`, `toolChoice`, `sessionConfig`, `onProgress(progress)`. Tool behavior uses session config; pass `sessionConfig` to override for this request only (takes priority over Redis).
-- `sendCommand(sessionId, command, options?): Promise<StepResult>` — Resume after status `interrupted`. The `command` is a discriminated union (`ResumeCommand`):
-  - `{ type: 'tool_approval', approved: { [toolName]: true | false } }` — approve/reject tools
-  - `{ type: 'hitl_response', response: '...' }` — tip the agent (agent formulates reply)
-  - `{ type: 'hitl_direct_reply', message: '...' }` — send as the agent (no model call)
-- `endChat(sessionId): Promise<StepResult>` — End the conversation
+- `sendPrompt(sessionId, agentId, prompt, options?): Promise<StepResult>` — Send a new user message. Options: `attachments` (images, video, audio, or documents — see type `PromptAttachment`), `goalId`, `context`, `initialMessages`, `priority`, `toolChoice`, `sessionConfig`, `onProgress(progress)`. Tool behavior uses session config; pass `sessionConfig` to override for this request only (takes priority over Redis).
+- `sendCommand(sessionId, agentId, command, options?): Promise<StepResult>` — Resume after status `interrupted`. The `command` is a discriminated union (`ResumeCommand`):
+  - `{ type: 'tool_approval', payload: { approved: { [toolName]: true | false } } }` — approve/reject tools
+  - `{ type: 'hitl_response', payload: { message: '...' } }` — tip the agent (agent formulates reply)
+  - `{ type: 'hitl_direct_reply', payload: { message: '...' } }` — send as the agent (no model call)
+- `endChat(sessionId, agentId, context?): Promise<StepResult>` — End the conversation
+- `addDocument(agentId, source, options?): Promise<void>` — Add a document to an agent's RAG index. `source`: `{ type: 'url', url }`, `{ type: 'file', path }`, or `{ type: 'text', text }`. Provide `rag.defaultEmbedding` in constructor or pass `{ embedding, indexName? }` in options.
 - `getConversationHistory(sessionId): Promise<SerializedMessage[]>` — Get full history
 - `close(): Promise<void>` — Close client connections
 
@@ -261,10 +307,11 @@ Returned by `sendPrompt`, `sendCommand`, and `endChat`:
 ```typescript
 interface StepResult {
   history: SerializedMessage[];       // New messages from this step
+  agentId?: string;                   // Agent that produced this result
   goalId?: string;                    // Active goal
   status: 'active' | 'interrupted' | 'ended' | 'routing';
   interrupts?: Interrupt[];           // When status is 'interrupted': pending actions
-  childrenValues?: Record<string, StepResult>; // Per-agent results (multi-agent mode)
+  childrenValues?: Record<string, StepResult>; // Per-goal results (multi-agent mode)
 }
 
 interface Interrupt {

@@ -22,7 +22,8 @@
     "test:watch": "vitest",
     "prepublishOnly": "npm run build",
     "example:single": "tsx examples/single-agent.ts",
-    "example:multi": "tsx examples/multi-agent.ts"
+    "example:multi": "tsx examples/multi-agent.ts",
+    "example:rag": "tsx examples/rag-agent.ts"
   },
   "keywords": [
     "bullmq",
@@ -46,14 +47,17 @@
     "node": ">=18"
   },
   "dependencies": {
+    "@langchain/cohere": "^1.0.4",
     "@langchain/core": "^1.1.0",
+    "@langchain/openai": "^1.2.11",
+    "@langchain/redis": "^1.1.0",
     "@sinclair/typebox": "^0.34.0",
     "bullmq": "^5.0.0",
-    "langchain": "^1.2.0"
+    "langchain": "^1.2.0",
+    "redis": "^4.7.1"
   },
   "devDependencies": {
     "@clack/prompts": "^0.7.0",
-    "@langchain/openai": "^1.2.0",
     "@types/node": "^25.3.2",
     "tsx": "^4.21.0",
     "typescript": "^5.7.0",
@@ -66,13 +70,13 @@
     "ioredis": {
       "optional": true
     },
-    "@langchain/openai": {
-      "optional": true
-    },
     "@langchain/anthropic": {
       "optional": true
     },
     "@langchain/google-genai": {
+      "optional": true
+    },
+    "@langchain/cohere": {
       "optional": true
     }
   }
