@@ -53,7 +53,7 @@ async function main() {
     }
   });
 
-  const client = new AgentClient({ connection: REDIS, queuePrefix: '1234' });
+  const client = new AgentClient({ connection: REDIS });
 
   await worker.start();
 
