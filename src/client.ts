@@ -7,12 +7,19 @@ import {
   fetchAggregatorResultsWithChildren,
   fetchSessionResults,
 } from './history.js';
+import {
+  getSessionConfig as getSessionConfigStore,
+  setSessionConfig as setSessionConfigStore,
+  type SessionConfig,
+  type RedisLike,
+} from './sessionConfig.js';
 import type {
   AgentClientOptions,
   JobProgress,
   JobRetention,
   JobType,
   OrchestratorJobData,
+  PromptAttachment,
   ResumeCommand,
   SerializedMessage,
   StepResult,
@@ -28,6 +35,7 @@ import { waitForJobWithProgress } from './waitWithProgress.js';
 
 export class AgentClient {
   private readonly connection: ConnectionOptions;
+  private readonly queuePrefix: string;
   private readonly orchestratorQueue: Queue;
   private readonly aggregatorQueue: Queue;
   private readonly orchestratorEvents: QueueEvents;
@@ -38,9 +46,10 @@ export class AgentClient {
 
   constructor(options: AgentClientOptions) {
     this.connection = options.connection;
+    this.queuePrefix = options.queuePrefix ?? '';
     this.retention = { ...DEFAULT_JOB_RETENTION, ...options.jobRetention };
     this.keepResult = { age: this.retention.age, count: this.retention.count };
-    const prefix = options.queuePrefix;
+    const prefix = this.queuePrefix;
     const orchQueue = getQueueName(prefix, ORCHESTRATOR_QUEUE);
     const aggQueue = getQueueName(prefix, AGGREGATOR_QUEUE);
     const agentQueue = getQueueName(prefix, AGENT_QUEUE);
@@ -64,11 +73,15 @@ export class AgentClient {
   /**
    * Send a new user message. For human-in-the-loop (approve/reject tools or reply to
    * human_in_the_loop), use sendCommand() instead.
+   * Uses session config for autoExecuteTools and humanInTheLoop (see setSessionConfig).
+   * Optionally pass sessionConfig here to override the stored session config for this request only.
    */
   async sendPrompt(
     sessionId: string,
     prompt: string,
     options?: {
+      /** Optional attachments (e.g. images) to send with the prompt. */
+      attachments?: PromptAttachment[];
       context?: Record<string, unknown>;
       /** When set, use this goal only (no LLM routing). */
       goalId?: string;
@@ -78,8 +91,8 @@ export class AgentClient {
       priority?: number;
       /** Enforce a tool choice for this step (e.g. tool name, "auto", "any", "none"). */
       toolChoice?: string | Record<string, unknown> | 'auto' | 'any' | 'none';
-      /** When true, tools run automatically without confirmation. When omitted or false, user confirmation is required. */
-      autoExecuteTools?: boolean;
+      /** Override session config for this request only (takes priority over Redis session config). */
+      sessionConfig?: SessionConfig;
       /** Called when the job reports progress (e.g. prompt-read, thinking, typing). Uses BullMQ job progress. */
       onProgress?: (progress: JobProgress) => void;
     },
@@ -134,6 +147,30 @@ export class AgentClient {
   }
 
   // -----------------------------------------------------------------------
+  // Session config (autoExecuteTools, humanInTheLoop per session)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Set config for a session. The worker reads this when processing jobs for the session.
+   * Call before or at the start of a conversation.
+   */
+  async setSessionConfig(
+    sessionId: string,
+    config: SessionConfig,
+  ): Promise<void> {
+    const redis = (await this.orchestratorQueue.client) as RedisLike;
+    await setSessionConfigStore(redis, this.queuePrefix, sessionId, config);
+  }
+
+  /**
+   * Get current session config (defaults when not set).
+   */
+  async getSessionConfig(sessionId: string): Promise<Required<SessionConfig>> {
+    const redis = (await this.orchestratorQueue.client) as RedisLike;
+    return getSessionConfigStore(redis, this.queuePrefix, sessionId);
+  }
+
+  // -----------------------------------------------------------------------
   // State queries
   // -----------------------------------------------------------------------
 
@@ -173,15 +210,18 @@ export class AgentClient {
     extra: {
       type: JobType;
       prompt?: string;
+      attachments?: PromptAttachment[];
       command?: ResumeCommand;
       context?: Record<string, unknown>;
       goalId?: string;
       initialMessages?: SerializedMessage[];
       priority?: number;
       toolChoice?: string | Record<string, unknown> | 'auto' | 'any' | 'none';
+      sessionConfig?: SessionConfig;
+      onProgress?: (progress: JobProgress) => void;
     },
   ): Promise<Job<OrchestratorJobData>> {
-    const { priority, ...jobData } = extra;
+    const { priority, onProgress: _onProgress, ...jobData } = extra;
     const opts: { jobId: string; removeOnComplete: KeepJobs; removeOnFail: KeepJobs; priority?: number } = {
       jobId: `${sessionId}/${Date.now()}`,
       removeOnComplete: this.keepResult,

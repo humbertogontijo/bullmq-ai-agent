@@ -141,6 +141,12 @@ const client = new AgentClient({
 
 const sessionId = 'user-123';
 
+// Optional: set session config (human-in-the-loop, auto-execute tools). Defaults: both false.
+await client.setSessionConfig(sessionId, {
+  humanInTheLoop: true,   // Agent can pause and ask the operator for input
+  autoExecuteTools: false // Require user confirmation before running tools
+});
+
 // Send a prompt (optionally with progress callback)
 let result = await client.sendPrompt(sessionId, 'Find flights from SFO to JFK on March 15', {
   onProgress: (p) => console.log(p.phase), // 'prompt-read' | 'thinking' | 'typing' | ...
@@ -211,7 +217,8 @@ new AgentWorker(options: AgentWorkerOptions)
 | `connection`        | `ConnectionOptions` | Redis connection (from BullMQ)                                    |
 | `llmConfig`        | `(options) => Promise<AgentWorkerLlmConfigData>` | Called each step; return config for `initChatModel` (model, apiKey, etc.) |
 | `goals`             | `AgentGoal[]`       | One or more agent goals with tools                                |
-| `humanInTheLoop`    | `boolean?`          | When true, adds a `human_in_the_loop` tool so the agent can pause for a live operator to tip it or send the reply as the agent |
+
+`humanInTheLoop` and `autoExecuteTools` are configured **per session** via `client.setSessionConfig(sessionId, config)` (see below).
 
 
 **Methods:**
@@ -236,7 +243,9 @@ new AgentClient(options: AgentClientOptions)
 
 **Methods:**
 
-- `sendPrompt(sessionId, prompt, options?): Promise<StepResult>` — Send a new user message. Options: `goalId`, `context`, `initialMessages`, `priority`, `toolChoice`, `autoExecuteTools`, `onProgress(progress)`.
+- `setSessionConfig(sessionId, config): Promise<void>` — Set config for a session. `config: { humanInTheLoop?: boolean, autoExecuteTools?: boolean }`. Call before or at the start of a conversation. The worker reads this when processing jobs for the session.
+- `getSessionConfig(sessionId): Promise<Required<SessionConfig>>` — Get current session config (returns defaults when not set).
+- `sendPrompt(sessionId, prompt, options?): Promise<StepResult>` — Send a new user message. Options: `attachments` (images, video, audio, or documents — see type `PromptAttachment`), `goalId`, `context`, `initialMessages`, `priority`, `toolChoice`, `sessionConfig`, `onProgress(progress)`. Tool behavior uses session config; pass `sessionConfig` to override for this request only (takes priority over Redis).
 - `sendCommand(sessionId, command, options?): Promise<StepResult>` — Resume after status `interrupted`. The `command` is a discriminated union (`ResumeCommand`):
   - `{ type: 'tool_approval', approved: { [toolName]: true | false } }` — approve/reject tools
   - `{ type: 'hitl_response', response: '...' }` — tip the agent (agent formulates reply)

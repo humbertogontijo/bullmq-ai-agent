@@ -4,6 +4,8 @@ export { deriveResponse, deriveToolCalls } from './history.js';
 export { waitForJobWithProgress } from './waitWithProgress.js';
 export type { ProgressSource } from './waitWithProgress.js';
 
+export type { SessionConfig } from './sessionConfig.js';
+
 export {
   ORCHESTRATOR_QUEUE,
   AGENT_QUEUE,
@@ -25,6 +27,7 @@ export type {
   InterruptType,
   JobProgress,
   JobProgressPhase,
+  PromptAttachment,
   JobRetention,
   ToolApprovalCommand,
   ToolApprovalDetail,

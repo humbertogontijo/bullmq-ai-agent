@@ -25,6 +25,29 @@ export interface AgentGoal {
 }
 
 // ---------------------------------------------------------------------------
+// Attachments (multimodal prompt content)
+// ---------------------------------------------------------------------------
+
+/**
+ * Image, video, audio, or document (file) attachment using URL, base64 data, or provider file ID.
+ * Compatible with LangChain ContentBlock.Multimodal (image, video, audio, file).
+ */
+export interface PromptAttachment {
+  type: 'image' | 'video' | 'audio' | 'file';
+  /** MIME type; recommended when using `data`, required by some providers for base64. */
+  mimeType?: string;
+  metadata?: Record<string, unknown>;
+  /** Public or signed URL of the media/file. */
+  url?: string;
+  /** Base64-encoded data; when set, provide `mimeType` for best compatibility. */
+  data?: string;
+  /** Provider file ID (e.g. OpenAI Files API). */
+  fileId?: string;
+  /** For type `'image'`: hint for image detail level (e.g. OpenAI). */
+  detail?: 'auto' | 'low' | 'high';
+}
+
+// ---------------------------------------------------------------------------
 // Serialized LangChain messages (stored in BullMQ job returnvalue)
 // ---------------------------------------------------------------------------
 
@@ -33,6 +56,8 @@ export type SerializedMessageRole = 'system' | 'human' | 'ai' | 'tool';
 export interface SerializedMessage {
   role: SerializedMessageRole;
   content: string;
+  /** For human messages: optional multimodal attachments (e.g. images). */
+  attachments?: PromptAttachment[];
   toolCallId?: string;
   toolCalls?: SerializedToolCall[];
 }
@@ -159,6 +184,8 @@ export interface OrchestratorJobData {
   sessionId: string;
   type: JobType;
   prompt?: string;
+  /** Optional attachments (e.g. images) for the user message when type === 'prompt'. */
+  attachments?: PromptAttachment[];
   /** When type === 'command', the resume payload for human-in-the-loop. */
   command?: ResumeCommand;
   /**
@@ -179,10 +206,9 @@ export interface OrchestratorJobData {
    */
   toolChoice?: string | Record<string, unknown> | 'auto' | 'any' | 'none';
   /**
-   * When true, tools are executed automatically when the LLM requests them.
-   * When omitted or false, user confirmation is required before executing tools.
+   * Optional per-request session config. When set, overrides the session config from Redis for this step only.
    */
-  autoExecuteTools?: boolean;
+  sessionConfig?: { autoExecuteTools?: boolean; humanInTheLoop?: boolean };
 }
 
 /** Data for per-agent child jobs (created by the orchestrator worker). */
@@ -190,6 +216,8 @@ export interface AgentChildJobData {
   sessionId: string;
   goalId: string;
   prompt?: string;
+  /** Optional attachments for the user message (passed from orchestrator job). */
+  attachments?: PromptAttachment[];
   /** Carried over when resuming from status 'interrupted' (tool approval). */
   toolCalls?: ToolCall[];
   /** Resume payload when resuming from interrupted. */
@@ -204,8 +232,10 @@ export interface AgentChildJobData {
   context?: Record<string, unknown>;
   /** Optional tool choice (passed from orchestrator job when present). */
   toolChoice?: string | Record<string, unknown> | 'auto' | 'any' | 'none';
-  /** When true, execute tools automatically; when omitted or false, require user confirmation. */
+  /** From session config: when true, execute tools automatically. */
   autoExecuteTools?: boolean;
+  /** From session config: when true, add human_in_the_loop tool to the agent. */
+  humanInTheLoop?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -301,13 +331,6 @@ export interface AgentWorkerOptions {
    */
   llmConfig: AgentWorkerLlmConfig;
   goals: AgentGoal[];
-  /**
-   * When true, adds a built-in tool "human_in_the_loop" to every goal so the agent can
-   * pause and ask the user for clarification. When the agent calls it, the step returns
-   * status 'interrupted' with interrupts[].actionRequests containing the request; use
-   * sendCommand({ type: 'hitl_response', response: '...' }) to resume.
-   */
-  humanInTheLoop?: boolean;
 }
 
 export interface AgentClientOptions {

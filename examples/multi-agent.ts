@@ -63,7 +63,6 @@ async function main() {
     connection: REDIS,
     llmConfig: async () => ({ model: 'openai:gpt-4o', apiKey }),
     goals: [flightGoal, hrGoal],
-    humanInTheLoop: true,
   });
 
   const client = new AgentClient({ connection: REDIS });
@@ -71,6 +70,11 @@ async function main() {
   await worker.start();
 
   const sessionId = 'example-session';
+
+  await client.setSessionConfig(sessionId, {
+    humanInTheLoop: true,
+    autoExecuteTools: false,
+  });
 
   const history = await client.getConversationHistory(sessionId);
   if (history.length > 0) {
@@ -87,7 +91,6 @@ async function main() {
     progressSpinner.start('Sending...');
 
     let result = await client.sendPrompt(sessionId, input, {
-      autoExecuteTools: false,
       onProgress: (progress) => progressSpinner.message(progressLabel(progress)),
     });
 

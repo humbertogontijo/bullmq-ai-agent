@@ -1,5 +1,6 @@
 import type { ToolDefinition } from '@langchain/core/language_models/base';
 import type { BaseMessage } from '@langchain/core/messages';
+import type { MessageContent } from '@langchain/core/messages';
 import {
   AIMessage,
   HumanMessage,
@@ -37,11 +38,13 @@ import type {
   JobProgress,
   JobType,
   OrchestratorJobData,
+  PromptAttachment,
   ResumeCommand,
   SerializedMessage,
   StepResult,
   ToolApprovalDetail,
 } from './types.js';
+import { getSessionConfig, type SessionConfig } from './sessionConfig.js';
 import {
   AGENT_QUEUE,
   AGGREGATOR_QUEUE,
@@ -50,6 +53,7 @@ import {
   HUMAN_INPUT_TOOL_DEFINITION,
   ORCHESTRATOR_QUEUE,
 } from './types.js';
+import type { RedisLike } from './sessionConfig.js';
 import { getJobNameFromGoalId } from './utils.js';
 
 // ---------------------------------------------------------------------------
@@ -62,7 +66,38 @@ function serializeMessages(msgs: BaseMessage[]): SerializedMessage[] {
       return { role: 'system' as const, content: m.content as string };
     }
     if (m instanceof HumanMessage) {
-      return { role: 'human' as const, content: m.content as string };
+      const content = m.content;
+      if (Array.isArray(content)) {
+        const textParts: string[] = [];
+        const attachments: PromptAttachment[] = [];
+        for (const block of content) {
+          if (typeof block !== 'object' || block === null || !('type' in block)) continue;
+          if (block.type === 'text' && 'text' in block) {
+            textParts.push(String(block.text));
+          } else if (
+            (block.type === 'image' || block.type === 'video' || block.type === 'audio' || block.type === 'file') &&
+            ('url' in block || 'data' in block || 'fileId' in block)
+          ) {
+            const b = block as Record<string, unknown>;
+            attachments.push({
+              type: block.type,
+              ...(b.mimeType != null && { mimeType: b.mimeType as string }),
+              ...(b.metadata != null && { metadata: b.metadata as Record<string, unknown> }),
+              ...(b.url != null && { url: b.url as string }),
+              ...(b.data != null && { data: b.data as string }),
+              ...(b.fileId != null && { fileId: b.fileId as string }),
+              ...(block.type === 'image' && b.detail != null && { detail: b.detail as 'auto' | 'low' | 'high' }),
+            });
+          }
+        }
+        const out: SerializedMessage = {
+          role: 'human' as const,
+          content: textParts.join('\n\n') || '',
+        };
+        if (attachments.length) out.attachments = attachments;
+        return out;
+      }
+      return { role: 'human' as const, content: content as string };
     }
     if (m instanceof ToolMessage) {
       return {
@@ -93,8 +128,16 @@ function deserializeMessages(msgs: SerializedMessage[]): BaseMessage[] {
     switch (m.role) {
       case 'system':
         return new SystemMessage(m.content);
-      case 'human':
+      case 'human': {
+        if (m.attachments?.length) {
+          const content: MessageContent = [
+            { type: 'text', text: m.content },
+            ...m.attachments,
+          ] as MessageContent;
+          return new HumanMessage(content);
+        }
         return new HumanMessage(m.content);
+      }
       case 'tool':
         return new ToolMessage({
           content: m.content,
@@ -235,12 +278,25 @@ async function processToolApproval(
 // Shared goal step input
 // ---------------------------------------------------------------------------
 
+/** Build content for HumanMessage: string or [text, ...attachments] for multimodal. */
+function buildHumanContent(
+  prompt: string,
+  attachments?: PromptAttachment[],
+): MessageContent {
+  if (!attachments?.length) return prompt;
+  return [
+    { type: 'text' as const, text: prompt },
+    ...attachments,
+  ] as MessageContent;
+}
+
 interface GoalStepInput {
   goal: AgentGoal;
   sessionId: string;
   context?: Record<string, unknown>;
   initialMessages?: SerializedMessage[];
   prompt?: string;
+  attachments?: PromptAttachment[];
   command?: ResumeCommand;
   /** Pre-extracted action requests from the previous interrupt (for tool_approval). */
   actionRequests?: ActionRequest[];
@@ -250,6 +306,7 @@ interface GoalStepInput {
   pendingMessages?: SerializedMessage[];
   toolChoice?: string | Record<string, unknown> | 'auto' | 'any' | 'none';
   autoExecuteTools?: boolean;
+  humanInTheLoop?: boolean;
   onProgress?: (progress: JobProgress) => void;
 }
 
@@ -264,7 +321,6 @@ export class AgentWorker {
   private readonly multiGoalMode: boolean;
   private readonly queuePrefix: string;
   private readonly logger?: AgentWorkerLogger;
-  private readonly humanInTheLoop: boolean;
 
   private orchestratorWorker!: Worker;
   private agentWorkerInstance!: Worker;
@@ -286,7 +342,6 @@ export class AgentWorker {
     this.multiGoalMode = options.goals.length > 1;
     this.queuePrefix = options.queuePrefix ?? '';
     this.logger = options.logger;
-    this.humanInTheLoop = options.humanInTheLoop === true;
   }
 
   async start(): Promise<void> {
@@ -387,6 +442,16 @@ export class AgentWorker {
       sessionId,
     });
 
+    const redis = (await this.orchestratorQueue.client) as RedisLike;
+    const fromRedis = await getSessionConfig(redis, this.queuePrefix, sessionId);
+    const requestOverride = job.data.sessionConfig;
+    const sessionConfig: Required<SessionConfig> = requestOverride
+      ? {
+          autoExecuteTools: requestOverride.autoExecuteTools ?? fromRedis.autoExecuteTools,
+          humanInTheLoop: requestOverride.humanInTheLoop ?? fromRedis.humanInTheLoop,
+        }
+      : fromRedis;
+
     const prevState = await findLatestResult(
       this.orchestratorQueue,
       this.aggregatorQueue,
@@ -409,7 +474,7 @@ export class AgentWorker {
       if (!this.multiGoalMode || job.data.goalId) {
         const singleGoalId =
           job.data.goalId ?? prevState?.goalId ?? [...this.goals.keys()][0];
-        return this.processSingleGoalStep(job, singleGoalId, type, prompt, prevState);
+        return this.processSingleGoalStep(job, singleGoalId, type, prompt, prevState, sessionConfig);
       }
 
       // Multi-goal: tool_approval for interrupted agents
@@ -422,7 +487,7 @@ export class AgentWorker {
           ([, r]) => r.status === 'interrupted',
         );
         if (awaitingAgents.length > 0) {
-          const routingJobId = await this.createConfirmFlow(job, awaitingAgents);
+          const routingJobId = await this.createConfirmFlow(job, awaitingAgents, sessionConfig);
           return { history: [], status: 'routing', routingJobId };
         }
       }
@@ -443,6 +508,7 @@ export class AgentWorker {
             humanAction.id,
             command,
             humanInterrupt.pendingMessages,
+            sessionConfig,
           );
           return { history: [], status: 'routing', routingJobId };
         }
@@ -455,14 +521,15 @@ export class AgentWorker {
     if (!this.multiGoalMode || job.data.goalId) {
       const singleGoalId =
         job.data.goalId ?? prevState?.goalId ?? [...this.goals.keys()][0];
-      return this.processSingleGoalStep(job, singleGoalId, type, prompt, prevState);
+      return this.processSingleGoalStep(job, singleGoalId, type, prompt, prevState, sessionConfig);
     }
 
     // Multi-goal mode (routing)
     if (type === 'prompt') {
       await job.updateProgress({ phase: 'routing', sessionId });
+      const promptText = job.data.prompt ?? '';
       const agentIds = await this.routeToAgents(
-        prompt ?? '',
+        promptText,
         prevState?.childrenValues
           ? deriveRoutingHistory(prevState.childrenValues)
           : prevState?.history ?? [],
@@ -471,10 +538,19 @@ export class AgentWorker {
       const routingJobId = await this.createAgentFlow(
         job,
         agentIds,
-        prompt ?? '',
+        promptText,
+        sessionConfig,
       );
+      const hasContent = promptText || job.data.attachments?.length;
+      const historyEntry: SerializedMessage | undefined = hasContent
+        ? {
+            role: 'human' as const,
+            content: promptText,
+            ...(job.data.attachments?.length && { attachments: job.data.attachments }),
+          }
+        : undefined;
       return {
-        history: prompt ? [{ role: 'human' as const, content: prompt }] : [],
+        history: historyEntry ? [historyEntry] : [],
         status: 'routing',
         routingJobId,
       };
@@ -492,7 +568,7 @@ export class AgentWorker {
   ): Promise<StepResult> {
     const {
       sessionId, goalId, prompt, toolCalls, context, initialMessages,
-      toolChoice, autoExecuteTools, resume, humanInputToolCallId, pendingMessages,
+      toolChoice, autoExecuteTools, humanInTheLoop, resume, humanInputToolCallId, pendingMessages,
     } = job.data;
     const goal = this.goals.get(goalId);
     if (!goal) {
@@ -512,12 +588,14 @@ export class AgentWorker {
       context,
       initialMessages,
       prompt,
+      attachments: job.data.attachments,
       command: resume,
       actionRequests,
       humanInputToolCallId,
       pendingMessages,
       toolChoice,
-      autoExecuteTools,
+      autoExecuteTools: autoExecuteTools === true,
+      humanInTheLoop: humanInTheLoop === true,
       onProgress: (progress) => job.updateProgress({ ...progress, sessionId, goalId }),
     });
   }
@@ -529,17 +607,17 @@ export class AgentWorker {
   private async resolveGoalStep(input: GoalStepInput): Promise<StepResult> {
     const {
       goal, sessionId, context, initialMessages,
-      prompt, command, actionRequests, humanInputToolCallId, pendingMessages,
-      toolChoice, autoExecuteTools, onProgress,
+      prompt, attachments, command, actionRequests, humanInputToolCallId, pendingMessages,
+      toolChoice, autoExecuteTools, humanInTheLoop = false, onProgress,
     } = input;
 
     const model = await this.createLLM(
-      toToolDefinitions(goal.tools, this.humanInTheLoop),
+      toToolDefinitions(goal.tools, humanInTheLoop),
       { goalId: goal.id, context },
     );
 
     const messages: BaseMessage[] = [
-      new SystemMessage(buildAgentSystemMessage(goal, this.humanInTheLoop)),
+      new SystemMessage(buildAgentSystemMessage(goal, humanInTheLoop)),
     ];
 
     if (initialMessages?.length) {
@@ -604,9 +682,9 @@ export class AgentWorker {
           break;
         }
       }
-    } else if (prompt) {
+    } else if (prompt !== undefined || attachments?.length) {
       stripTrailingToolCalls(messages);
-      messages.push(new HumanMessage(prompt));
+      messages.push(new HumanMessage(buildHumanContent(prompt ?? '', attachments)));
     } else {
       return { goalId: goal.id, history: [], status: 'active' };
     }
@@ -753,13 +831,14 @@ export class AgentWorker {
     type: JobType,
     prompt: string | undefined,
     prevState: StepResult | null,
+    sessionConfig: Required<SessionConfig>,
   ): Promise<StepResult> {
     const goal = this.goals.get(goalId);
     if (!goal) {
       return { history: [], goalId, status: 'active' };
     }
 
-    const { sessionId, context, initialMessages, toolChoice, autoExecuteTools } = job.data;
+    const { sessionId, context, initialMessages, toolChoice } = job.data;
     const command = job.data.command;
     const onProgress = (progress: JobProgress) =>
       job.updateProgress({ ...progress, sessionId, goalId });
@@ -781,18 +860,21 @@ export class AgentWorker {
         humanInputToolCallId: humanAction?.id,
         pendingMessages: hitlInterrupt?.pendingMessages,
         toolChoice,
-        autoExecuteTools: autoExecuteTools === true,
+        autoExecuteTools: sessionConfig.autoExecuteTools,
+        humanInTheLoop: sessionConfig.humanInTheLoop,
         onProgress,
       });
-    } else if (type === 'prompt' && prompt !== undefined && prompt !== '') {
+    } else if (type === 'prompt' && (prompt !== undefined || job.data.attachments?.length)) {
       result = await this.resolveGoalStep({
         goal,
         sessionId,
         context,
         initialMessages,
-        prompt,
+        prompt: prompt ?? '',
+        attachments: job.data.attachments,
         toolChoice,
-        autoExecuteTools: autoExecuteTools === true,
+        autoExecuteTools: sessionConfig.autoExecuteTools,
+        humanInTheLoop: sessionConfig.humanInTheLoop,
         onProgress,
       });
     } else {
@@ -804,10 +886,14 @@ export class AgentWorker {
     if (
       result.status === 'interrupted' &&
       result.interrupts?.some((i) => i.type === 'human_input') &&
-      prompt !== undefined &&
-      prompt !== ''
+      (prompt !== undefined || job.data.attachments?.length)
     ) {
-      result = { ...result, history: serializeMessages([new HumanMessage(prompt)]) };
+      result = {
+        ...result,
+        history: serializeMessages([
+          new HumanMessage(buildHumanContent(prompt ?? '', job.data.attachments)),
+        ]),
+      };
     }
 
     return result;
@@ -855,8 +941,9 @@ export class AgentWorker {
     orchestratorJob: Job<OrchestratorJobData>,
     agentIds: string[],
     prompt: string,
+    sessionConfig: Required<SessionConfig>,
   ): Promise<string> {
-    const { sessionId, context, initialMessages, toolChoice, autoExecuteTools } = orchestratorJob.data;
+    const { sessionId, context, initialMessages, toolChoice } = orchestratorJob.data;
     const ts = Date.now();
     const aggregatorJobId = `${sessionId}/${ts}`;
     const { removeOnComplete, removeOnFail } = orchestratorJob.opts;
@@ -879,10 +966,14 @@ export class AgentWorker {
           sessionId,
           goalId,
           prompt,
+          autoExecuteTools: sessionConfig.autoExecuteTools,
+          humanInTheLoop: sessionConfig.humanInTheLoop,
           ...(context !== undefined && { context }),
           ...(initialMessages !== undefined && { initialMessages }),
+          ...(orchestratorJob.data.attachments !== undefined && {
+            attachments: orchestratorJob.data.attachments,
+          }),
           ...(toolChoice !== undefined && { toolChoice }),
-          ...(autoExecuteTools !== undefined && { autoExecuteTools }),
         } satisfies AgentChildJobData,
         opts: {
           jobId: `${sessionId}/${ts}/${goalId}`,
@@ -898,6 +989,7 @@ export class AgentWorker {
   private async createConfirmFlow(
     orchestratorJob: Job<OrchestratorJobData>,
     awaitingAgents: [string, StepResult][],
+    sessionConfig: Required<SessionConfig>,
   ): Promise<string> {
     const { sessionId, context, initialMessages } = orchestratorJob.data;
     const command = orchestratorJob.data.command;
@@ -925,6 +1017,8 @@ export class AgentWorker {
             sessionId,
             goalId,
             toolCalls: deriveToolCalls(result.history, goalId),
+            autoExecuteTools: sessionConfig.autoExecuteTools,
+            humanInTheLoop: sessionConfig.humanInTheLoop,
             ...(command !== undefined && { resume: command }),
             ...(toolApprovalInterrupt?.pendingMessages !== undefined && {
               pendingMessages: toolApprovalInterrupt.pendingMessages,
@@ -950,6 +1044,7 @@ export class AgentWorker {
     humanInputToolCallId: string,
     command: ResumeCommand,
     pendingMessages?: SerializedMessage[],
+    sessionConfig?: Required<SessionConfig>,
   ): Promise<string> {
     const { sessionId, context, initialMessages } = orchestratorJob.data;
     const ts = Date.now();
@@ -976,6 +1071,10 @@ export class AgentWorker {
             goalId,
             resume: command,
             humanInputToolCallId,
+            ...(sessionConfig && {
+              autoExecuteTools: sessionConfig.autoExecuteTools,
+              humanInTheLoop: sessionConfig.humanInTheLoop,
+            }),
             ...(pendingMessages !== undefined && { pendingMessages }),
             ...(context !== undefined && { context }),
             ...(initialMessages !== undefined && { initialMessages }),
