@@ -33,19 +33,14 @@ export type EmbeddingConfig =
   | { provider: 'openai'; model?: string; apiKey?: string }
   | { provider: 'cohere'; model?: string; apiKey?: string };
 
-/** Per-agent RAG config (index, embedding, topK). */
-export interface RAGConfig {
-  embedding?: EmbeddingConfig;
-  indexName?: string;
+/** Worker-level RAG options. When present on the worker (with embedding), RAG is enabled: document queue and retrieve tool use this config for all agents. */
+export interface AgentWorkerRagOptions {
+  /** Required when RAG is enabled. Used for indexing and retrieval. */
+  embedding: EmbeddingConfig;
+  /** Number of documents to retrieve (default 4). */
   topK?: number;
+  /** Name of the retrieve tool (default 'retrieve'). */
   retrieveToolName?: string;
-}
-
-/** Agent = individual with optional knowledge (RAG). Goals are objectives; tools come from the goal. An agent can execute any goal defined on the worker (or the goal specified on the job). */
-export interface Agent {
-  id: string;
-  name?: string;
-  rag?: RAGConfig;
 }
 
 /** Source for addDocument: URL, file path, or raw text. */
@@ -214,8 +209,7 @@ export type ResumeCommand = ToolApprovalCommand | HumanResponseCommand | HumanDi
 /** Data for orchestrator / single-agent queue jobs (created by the client). */
 export interface OrchestratorJobData {
   sessionId: string;
-  /** When set, worker resolves agent via getAgent and can use RAG. Omit for model-only (no agent). */
-  agentId?: string;
+  agentId: string;
   type: JobType;
   prompt?: string;
   /** Optional attachments (e.g. images) for the user message when type === 'prompt'. */
@@ -248,8 +242,8 @@ export interface OrchestratorJobData {
 /** Data for per-agent child jobs (created by the orchestrator worker). */
 export interface AgentChildJobData {
   sessionId: string;
-  /** When set, worker resolves agent and can use RAG. Omit for model-only runs. */
-  agentId?: string;
+  /** Required. Worker resolves agent and may use RAG when configured. */
+  agentId: string;
   goalId: string;
   prompt?: string;
   /** Optional attachments for the user message (passed from orchestrator job). */
@@ -274,7 +268,7 @@ export interface AgentChildJobData {
   humanInTheLoop?: boolean;
 }
 
-/** Data for add-document jobs (client enqueues; worker processes using getAgent + rag config). */
+/** Data for add-document jobs (client enqueues; worker processes using rag when RAG-enabled). */
 export interface DocumentJobData {
   agentId: string;
   source: DocumentSource;
@@ -373,25 +367,20 @@ export interface AgentWorkerOptions {
    * to langchain's `initChatModel`. Use for per-job, per-goal, or static LLM config.
    */
   llmConfig: AgentWorkerLlmConfig;
-  /** When provided, jobs with agentId resolve agent config (e.g. RAG). Omit for model-only (no agents). */
-  getAgent?: (agentId: string) => Promise<Agent | undefined>;
   /** Fixed list of goals (objectives). Agents can execute any of these goals. */
   goals: AgentGoal[];
-  /** Optional default embedding for agents that have rag but no embedding. */
-  rag?: { defaultEmbedding?: EmbeddingConfig };
+  /** When provided (with embedding), RAG is enabled: document queue and retrieve tool for all agents. Omit for workers without RAG. */
+  rag?: AgentWorkerRagOptions;
 }
 
-/** Options for ModelClient (no agent; session + prompt only). */
-export interface ModelClientOptions {
+/** Options for the client (session + agentId + prompt; addDocument when worker has RAG). */
+export interface AgentClientOptions {
   connection: ConnectionOptions;
   /** How long to keep completed/failed result jobs in Redis. */
   jobRetention?: JobRetention;
   /** Optional prefix for queue names. Must match the worker's queuePrefix. */
   queuePrefix?: string;
 }
-
-/** Options for AgentClient (adds agentId to send methods and addDocument that sends to worker). Extends ModelClientOptions. */
-export interface AgentClientOptions extends ModelClientOptions {}
 
 // ---------------------------------------------------------------------------
 // Job progress (BullMQ job.updateProgress payload)
@@ -435,5 +424,5 @@ export const DOCUMENT_QUEUE = 'agent-document';
 
 /** Resolve queue name with optional prefix (default empty for backward compatibility). */
 export function getQueueName(prefix: string | undefined, base: string): string {
-  return (prefix ?? '') + base;
+  return prefix ? `${prefix}/${base}` : base;
 }

@@ -1,8 +1,8 @@
 /**
- * RAG example: one agent with a knowledge base (RAG), one goal.
+ * RAG example: agent worker with RAG enabled, one agent, one goal.
  *
- * - Agent has RAG enabled (embedding + index). addDocument(agentId, source) loads from URL/file/text and indexes.
- * - Worker injects a "retrieve" tool when the agent has RAG; the agent can query its knowledge base.
+ * - Worker is started with rag: { embedding, topK } so it runs the document queue and injects the "retrieve" tool.
+ * - addDocument(agentId, source) sends to the worker; worker ingests using its rag.embedding.
  *
  * Run: npx tsx examples/rag-agent.ts
  * Requires: Redis with RediSearch (e.g. Redis Stack), OPENAI_API_KEY, and @langchain/openai for embeddings.
@@ -37,14 +37,6 @@ const goal: AgentGoal = {
 };
 
 const AGENT_ID = 'rag-agent';
-const agent: Agent = {
-  id: AGENT_ID,
-  name: 'RAG Agent',
-  rag: {
-    embedding: { provider: 'openai', model: 'text-embedding-3-small' },
-    topK: 4,
-  },
-};
 
 async function main() {
   p.intro('RAG Agent (knowledge base + retrieve tool)');
@@ -54,22 +46,25 @@ async function main() {
   const worker = new AgentWorker({
     connection: REDIS,
     llmConfig: async () => ({ model: 'openai:gpt-4o', apiKey }),
-    getAgent: async (id) => (id === AGENT_ID ? agent : undefined),
     goals: [goal],
-    rag: { defaultEmbedding: { provider: 'openai', model: 'text-embedding-3-small' } },
+    rag: {
+      embedding: { provider: 'openai', model: 'text-embedding-3-small' },
+      topK: 4,
+    },
+    queuePrefix: '1234'
   });
 
-  const client = new AgentClient({ connection: REDIS });
+  const client = new AgentClient({ connection: REDIS, queuePrefix: '1234' });
 
   await worker.start();
 
   const sessionId = 'rag-example-session';
 
-  // Index some text so the agent has something to retrieve (client sends to worker; worker uses getAgent + rag config)
+  // Index some text so the agent has something to retrieve (client sends to worker; worker uses ragOptions)
   try {
     await client.addDocument(AGENT_ID, {
       type: 'text',
-      text: 'The bullmq-ai-agent library uses BullMQ for job queues and LangChain for the LLM and tools. Agents are dynamic and resolved by the worker via getAgent(agentId). Each agent can have a RAG knowledge base stored in Redis (RedisVectorStore). Goals are fixed objectives; multiple agents can share the same goals.',
+      text: 'The bullmq-ai-agent library uses BullMQ for job queues and LangChain for the LLM and tools. Each agent can have a RAG knowledge base stored in Redis (RedisVectorStore). Goals are fixed objectives; multiple agents can share the same goals.',
     });
     p.log.success('Indexed sample document for the agent.');
   } catch (err) {

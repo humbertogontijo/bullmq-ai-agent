@@ -27,8 +27,8 @@ export interface RedisLike {
 
 const KEY_PREFIX = 'session_config:';
 
-function sessionConfigKey(queuePrefix: string, sessionId: string): string {
-  return (queuePrefix ?? '') + KEY_PREFIX + sessionId;
+function sessionConfigKey(queuePrefix: string | undefined, sessionId: string): string {
+  return queuePrefix ? `${queuePrefix}/${KEY_PREFIX}${sessionId}` : `${KEY_PREFIX}${sessionId}`;
 }
 
 /**
@@ -36,7 +36,7 @@ function sessionConfigKey(queuePrefix: string, sessionId: string): string {
  */
 export async function getSessionConfig(
   redis: RedisLike,
-  queuePrefix: string,
+  queuePrefix: string | undefined,
   sessionId: string,
 ): Promise<Required<SessionConfig>> {
   const key = sessionConfigKey(queuePrefix, sessionId);
@@ -58,7 +58,7 @@ export async function getSessionConfig(
  */
 export async function setSessionConfig(
   redis: RedisLike,
-  queuePrefix: string,
+  queuePrefix: string | undefined,
   sessionId: string,
   config: SessionConfig,
 ): Promise<void> {

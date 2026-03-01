@@ -1,5 +1,5 @@
 export { AgentWorker } from './worker.js';
-export { ModelClient, AgentClient } from './client.js';
+export { AgentClient } from './client.js';
 export { deriveResponse, deriveToolCalls } from './history.js';
 export { waitForJobWithProgress } from './waitWithProgress.js';
 export type { ProgressSource } from './waitWithProgress.js';
@@ -16,13 +16,11 @@ export {
 } from './types.js';
 export type {
   ActionRequest,
-  Agent,
   AgentTool,
   AgentGoal,
   AgentWorkerOptions,
   AgentWorkerLogger,
   AgentClientOptions,
-  ModelClientOptions,
   AgentResponseEvent,
   DocumentJobData,
   DocumentSource,
@@ -34,7 +32,7 @@ export type {
   JobProgress,
   JobProgressPhase,
   PromptAttachment,
-  RAGConfig,
+  AgentWorkerRagOptions,
   JobRetention,
   ToolApprovalCommand,
   ToolApprovalDetail,

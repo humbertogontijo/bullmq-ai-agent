@@ -10,7 +10,7 @@
 
 import * as p from '@clack/prompts';
 
-import { ModelClient, AgentWorker, type AgentGoal, type AgentTool } from '../src/index.js';
+import { AgentClient, AgentWorker, type Agent, type AgentGoal, type AgentTool } from '../src/index.js';
 import {
   askApiKey,
   askConfirm,
@@ -40,7 +40,9 @@ const flightGoal: AgentGoal = {
   tools: [searchFlights, bookFlight],
 };
 
-// --- Chat loop (ModelClient: no agent, just session + prompt) ---
+const AGENT_ID = 'flight-agent';
+
+// --- Chat loop ---
 
 async function main() {
   p.intro('Flight Finder (single-agent)');
@@ -53,7 +55,7 @@ async function main() {
     goals: [flightGoal],
   });
 
-  const client = new ModelClient({ connection: REDIS });
+  const client = new AgentClient({ connection: REDIS });
 
   await worker.start();
 
@@ -78,8 +80,9 @@ async function main() {
     const progressSpinner = p.spinner();
     progressSpinner.start('Sending...');
 
-    let result = await client.sendPrompt(sessionId, input, {
+    let result = await client.sendPrompt(AGENT_ID, sessionId, input, {
       onProgress: (progress) => progressSpinner.message(progressLabel(progress)),
+      goalId: flightGoal.id,
     });
 
     progressSpinner.stop('Done');
@@ -93,7 +96,7 @@ async function main() {
         if (intervention === null) break;
         const humanSpinner = p.spinner();
         humanSpinner.start('Sending...');
-        result = await client.sendCommand(sessionId, intervention, {
+        result = await client.sendCommand(AGENT_ID, sessionId, intervention, {
           onProgress: (progress) => humanSpinner.message(progressLabel(progress)),
         });
         humanSpinner.stop('Done');
@@ -106,7 +109,7 @@ async function main() {
           const approved = Object.fromEntries(
             actionRequests.map((a) => [a.name, true]),
           );
-          result = await client.sendCommand(sessionId, { type: 'tool_approval', payload: { approved } }, {
+          result = await client.sendCommand(AGENT_ID, sessionId, { type: 'tool_approval', payload: { approved } }, {
             onProgress: (progress) =>
               confirmSpinner.message(progressLabel(progress)),
           });

@@ -53,10 +53,6 @@ const hrGoal: AgentGoal = {
 };
 
 const AGENT_ID = 'example-agent';
-const exampleAgent: Agent = {
-  id: AGENT_ID,
-  name: 'Example Agent',
-};
 
 // --- Chat loop ---
 
@@ -68,7 +64,6 @@ async function main() {
   const worker = new AgentWorker({
     connection: REDIS,
     llmConfig: async () => ({ model: 'openai:gpt-4o', apiKey }),
-    getAgent: async (id) => (id === AGENT_ID ? exampleAgent : undefined),
     goals: [flightGoal, hrGoal],
   });
 

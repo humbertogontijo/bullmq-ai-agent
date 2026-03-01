@@ -40,7 +40,7 @@ export async function loadDocumentsFromSource(
       break;
     case 'text':
       pageContent = source.text;
-      metadata = source.metadata ?? {};
+      metadata = { source: 'inline', ...(source.metadata ?? {}) };
       break;
     default:
       throw new Error(`Unknown document source type: ${(source as DocumentSource).type}`);
