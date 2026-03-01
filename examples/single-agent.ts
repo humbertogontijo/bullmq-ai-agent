@@ -10,7 +10,7 @@
 
 import * as p from '@clack/prompts';
 
-import { AgentClient, AgentWorker, type Agent, type AgentGoal, type AgentTool } from '../src/index.js';
+import { AgentClient, AgentWorker, type AgentGoal } from '../src/index.js';
 import {
   askApiKey,
   askConfirm,

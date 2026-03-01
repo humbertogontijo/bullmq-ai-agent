@@ -40,19 +40,20 @@ export interface GetVectorStoreOptions {
   queuePrefix: string;
   agentId: string;
   embedding: EmbeddingConfig;
+  inferredSchema?: MetadataFieldSchema[];
 }
 
 /** Create a FluentRedisVectorStore for an agent. Requires a ready redisClient from the caller. */
 export async function getVectorStore(
   options: GetVectorStoreOptions,
 ): Promise<VectorStore> {
-  const { redisClient, queuePrefix, agentId, embedding } = options;
+  const { redisClient, queuePrefix, agentId, embedding, inferredSchema } = options;
   const indexName = getRAGIndexName(queuePrefix, agentId);
   const embeddings = getEmbeddings(embedding);
   const store = new FluentRedisVectorStore(embeddings, {
     redisClient: redisClient as ReturnType<typeof createClient>,
     indexName,
-    customSchema:  DEFAULT_RAG_METADATA_SCHEMA,
+    customSchema:  inferredSchema ?? DEFAULT_RAG_METADATA_SCHEMA,
   });
   return store;
 }

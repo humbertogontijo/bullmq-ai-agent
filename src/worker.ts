@@ -439,12 +439,14 @@ export class AgentWorker {
     const documents = await loadDocumentsFromSource(source);
     const splits = await splitDocuments(documents);
     const redisClient = await createRedisClient(this.connection);
+    const inferredSchema = inferMetadataSchema(splits);
     try {
       const store = await getVectorStore({
         redisClient,
         queuePrefix: this.queuePrefix,
         agentId,
         embedding,
+        inferredSchema: inferredSchema.length > 0 ? inferredSchema : undefined,
       });
       await store.addDocuments(splits);
     } finally {
