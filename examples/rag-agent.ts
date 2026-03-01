@@ -50,8 +50,7 @@ async function main() {
     rag: {
       embedding: { provider: 'openai', model: 'text-embedding-3-small' },
       topK: 4,
-    },
-    queuePrefix: '1234'
+    }
   });
 
   const client = new AgentClient({ connection: REDIS, queuePrefix: '1234' });

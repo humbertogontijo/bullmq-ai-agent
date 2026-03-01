@@ -1,14 +1,16 @@
 /**
- * Split documents into chunks. Uses simple chunking; optional @langchain/textsplitters can be used by callers.
+ * Split documents into chunks using RecursiveCharacterTextSplitter from @langchain/textsplitters.
  */
 
 import { Document } from '@langchain/core/documents';
+import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
 
 const DEFAULT_CHUNK_SIZE = 1000;
 const DEFAULT_CHUNK_OVERLAP = 200;
 
 /**
- * Split documents into chunks (simple length-based). For RecursiveCharacterTextSplitter, use @langchain/textsplitters in your app.
+ * Split documents into chunks using RecursiveCharacterTextSplitter.
+ * Splits recursively by paragraph, line, then space to keep semantic coherence.
  */
 export async function splitDocuments(
   documents: Document[],
@@ -16,15 +18,9 @@ export async function splitDocuments(
 ): Promise<Document[]> {
   const chunkSize = options.chunkSize ?? DEFAULT_CHUNK_SIZE;
   const chunkOverlap = options.chunkOverlap ?? DEFAULT_CHUNK_OVERLAP;
-  const out: Document[] = [];
-  for (const doc of documents) {
-    const text = doc.pageContent;
-    for (let i = 0; i < text.length; i += chunkSize - chunkOverlap) {
-      const chunk = text.slice(i, i + chunkSize);
-      if (chunk.trim()) {
-        out.push(new Document({ pageContent: chunk, metadata: { ...doc.metadata } }));
-      }
-    }
-  }
-  return out;
+  const splitter = new RecursiveCharacterTextSplitter({
+    chunkSize,
+    chunkOverlap,
+  });
+  return splitter.splitDocuments(documents);
 }
