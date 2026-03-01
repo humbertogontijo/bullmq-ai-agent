@@ -10,12 +10,14 @@
 
 import * as p from '@clack/prompts';
 
-import { AgentClient, AgentWorker, type AgentGoal } from '../src/index.js';
+import { AgentClient, AgentWorker, type AgentGoal, type AgentTool } from '../src/index.js';
 import {
   askApiKey,
   askConfirm,
   askInput,
+  askOperatorIntervention,
   closeInput,
+  hasHumanInputInterrupt,
   printHistory,
   printResult,
   printToolCalls,
@@ -29,8 +31,8 @@ const REDIS = { host: 'localhost', port: 6379 };
 
 const flightGoal: AgentGoal = {
   id: 'flight-booking',
-  agentName: 'Flight Finder',
-  agentFriendlyDescription: 'Search and book flights',
+  name: 'Flight Finder',
+  title: 'Search and book flights',
   description:
     'Help the user find and book flights. ' +
     '1. SearchFlights to find options. ' +
@@ -49,13 +51,14 @@ async function main() {
     connection: REDIS,
     llmConfig: async () => ({ model: 'openai:gpt-4o', apiKey }),
     goals: [flightGoal],
+    humanInTheLoop: true,
   });
 
-  const client = new AgentClient({ connection: REDIS });
+  const client = new AgentClient({ connection: REDIS,  });
 
   await worker.start();
 
-  const sessionId = `session-1`;
+  const sessionId = 'example-session';
 
   const history = await client.getConversationHistory(sessionId);
   if (history.length > 0) {
@@ -72,26 +75,43 @@ async function main() {
     progressSpinner.start('Sending...');
 
     let result = await client.sendPrompt(sessionId, input, {
-      autoExecuteTools: true,
+      autoExecuteTools: false,
       onProgress: (progress) => progressSpinner.message(progressLabel(progress)),
     });
 
     progressSpinner.stop('Done');
     printResult(result);
 
-    while (result.status === 'awaiting-confirm') {
+    while (result.status === 'interrupted') {
       printToolCalls(result);
-      if (await askConfirm()) {
-        const confirmSpinner = p.spinner();
-        confirmSpinner.start('Confirming...');
-        result = await client.confirm(sessionId, undefined, {
-          onProgress: (progress) =>
-            confirmSpinner.message(progressLabel(progress)),
+
+      if (hasHumanInputInterrupt(result)) {
+        const intervention = await askOperatorIntervention();
+        if (intervention === null) break;
+        const humanSpinner = p.spinner();
+        humanSpinner.start('Sending...');
+        result = await client.sendCommand(sessionId, intervention, {
+          onProgress: (progress) => humanSpinner.message(progressLabel(progress)),
         });
-        confirmSpinner.stop('Done');
+        humanSpinner.stop('Done');
         printResult(result);
       } else {
-        break;
+        if (await askConfirm()) {
+          const confirmSpinner = p.spinner();
+          confirmSpinner.start('Confirming...');
+          const actionRequests = result.interrupts?.flatMap((i) => i.actionRequests) ?? [];
+          const approved = Object.fromEntries(
+            actionRequests.map((a) => [a.name, true]),
+          );
+          result = await client.sendCommand(sessionId, { type: 'tool_approval', payload: { approved } }, {
+            onProgress: (progress) =>
+              confirmSpinner.message(progressLabel(progress)),
+          });
+          confirmSpinner.stop('Done');
+          printResult(result);
+        } else {
+          break;
+        }
       }
     }
   }

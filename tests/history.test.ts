@@ -7,7 +7,7 @@ import {
   extractAgentMessages,
   extractSingleGoalHistory,
 } from '../src/history.js';
-import type { AgentChildResult, SerializedMessage, SerializedMessageRole, StepResult } from '../src/types.js';
+import type { SerializedMessage, SerializedMessageRole, StepResult } from '../src/types.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -56,16 +56,16 @@ describe('extractSingleGoalHistory', () => {
 // ---------------------------------------------------------------------------
 
 describe('extractAgentMessages', () => {
-  it('returns empty array when no agentResults', () => {
+  it('returns empty array when no childrenValues', () => {
     expect(extractAgentMessages([], 'goal-1')).toEqual([]);
   });
 
   it('extracts messages for the matching goalId', () => {
     const results: StepResult[] = [
       stepResult({
-        agentResults: {
-          'goal-1': { goalId: 'goal-1', messages: [msg('ai', 'from goal-1')], status: 'complete' },
-          'goal-2': { goalId: 'goal-2', messages: [msg('ai', 'from goal-2')], status: 'complete' },
+        childrenValues: {
+          'goal-1': stepResult({ goalId: 'goal-1', history: [msg('ai', 'from goal-1')] }),
+          'goal-2': stepResult({ goalId: 'goal-2', history: [msg('ai', 'from goal-2')] }),
         },
       }),
     ];
@@ -77,8 +77,8 @@ describe('extractAgentMessages', () => {
   it('ignores results without the requested goalId', () => {
     const results: StepResult[] = [
       stepResult({
-        agentResults: {
-          'goal-2': { goalId: 'goal-2', messages: [msg('ai', 'irrelevant')], status: 'complete' },
+        childrenValues: {
+          'goal-2': stepResult({ goalId: 'goal-2', history: [msg('ai', 'irrelevant')] }),
         },
       }),
     ];
@@ -101,8 +101,8 @@ describe('buildConversationHistory', () => {
     ];
     const agg: StepResult[] = [
       stepResult({
-        agentResults: {
-          flight: { goalId: 'flight', messages: [msg('human', 'plan a trip'), msg('ai', 'found flights')], status: 'complete' },
+        childrenValues: {
+          flight: stepResult({ goalId: 'flight', history: [msg('human', 'plan a trip'), msg('ai', 'found flights')] }),
         },
       }),
     ];
@@ -116,8 +116,8 @@ describe('buildConversationHistory', () => {
   it('filters out human messages from agent results to avoid duplication', () => {
     const agg: StepResult[] = [
       stepResult({
-        agentResults: {
-          hr: { goalId: 'hr', messages: [msg('human', 'duplicate'), msg('ai', 'answer')], status: 'complete' },
+        childrenValues: {
+          hr: stepResult({ goalId: 'hr', history: [msg('human', 'duplicate'), msg('ai', 'answer')] }),
         },
       }),
     ];
@@ -193,29 +193,28 @@ describe('deriveToolCalls', () => {
 // ---------------------------------------------------------------------------
 
 describe('deriveRoutingHistory', () => {
-  it('returns empty for empty agentResults', () => {
+  it('returns empty for empty childrenValues', () => {
     expect(deriveRoutingHistory({})).toEqual([]);
   });
 
   it('builds AI messages prefixed with goalId from agent responses', () => {
-    const agentResults: Record<string, AgentChildResult> = {
-      flight: { goalId: 'flight', messages: [msg('ai', 'Found 3 flights')], status: 'complete' },
-      hr: { goalId: 'hr', messages: [msg('ai', 'You have 15 PTO days')], status: 'complete' },
+    const childrenValues: Record<string, StepResult> = {
+      flight: stepResult({ goalId: 'flight', history: [msg('ai', 'Found 3 flights')] }),
+      hr: stepResult({ goalId: 'hr', history: [msg('ai', 'You have 15 PTO days')] }),
     };
-    const history = deriveRoutingHistory(agentResults);
+    const history = deriveRoutingHistory(childrenValues);
     expect(history).toHaveLength(2);
     expect(history[0]).toEqual({ role: 'ai', content: '[flight] Found 3 flights' });
     expect(history[1]).toEqual({ role: 'ai', content: '[hr] You have 15 PTO days' });
   });
 
   it('skips agents with no text response', () => {
-    const agentResults: Record<string, AgentChildResult> = {
-      flight: {
+    const childrenValues: Record<string, StepResult> = {
+      flight: stepResult({
         goalId: 'flight',
-        messages: [msg('ai', '', { toolCalls: [{ id: '1', name: 'Search', args: {} }] })],
-        status: 'awaiting-confirm',
-      },
+        history: [msg('ai', '', { toolCalls: [{ id: '1', name: 'Search', args: {} }] })],
+      }),
     };
-    expect(deriveRoutingHistory(agentResults)).toEqual([]);
+    expect(deriveRoutingHistory(childrenValues)).toEqual([]);
   });
 });

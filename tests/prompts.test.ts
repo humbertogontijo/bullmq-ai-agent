@@ -9,8 +9,8 @@ import type { AgentGoal, SerializedMessage } from '../src/types.js';
 function makeGoal(overrides?: Partial<AgentGoal>): AgentGoal {
   return {
     id: 'test-goal',
-    agentName: 'Test Agent',
-    agentFriendlyDescription: 'A test agent',
+    name: 'Test Agent',
+    title: 'A test agent',
     description: 'Help the user with testing.',
     tools: [],
     ...overrides,
@@ -35,15 +35,19 @@ describe('buildAgentSystemMessage', () => {
     expect(msg).toContain('Always be polite.');
   });
 
-  it('does not include multi-agent section in single mode', () => {
+  it('does not mention human_in_the_loop when disabled', () => {
     const msg = buildAgentSystemMessage(makeGoal(), false);
-    expect(msg).not.toContain('Multi-Agent Mode');
+    expect(msg).not.toContain('human_in_the_loop');
   });
 
-  it('includes multi-agent section when enabled', () => {
+  it('mentions human_in_the_loop when enabled', () => {
     const msg = buildAgentSystemMessage(makeGoal(), true);
-    expect(msg).toContain('Multi-Agent Mode');
-    expect(msg).toContain('specialist agents');
+    expect(msg).toContain('human_in_the_loop');
+  });
+
+  it('includes the agent name in HITL mode', () => {
+    const msg = buildAgentSystemMessage(makeGoal(), true);
+    expect(msg).toContain('Test Agent');
   });
 
   it('includes the current date', () => {
@@ -60,8 +64,8 @@ describe('buildAgentSystemMessage', () => {
 describe('buildOrchestratorSystemMessage', () => {
   it('lists all agent descriptions', () => {
     const goals = [
-      makeGoal({ id: 'flight', agentName: 'Flight', agentFriendlyDescription: 'Book flights' }),
-      makeGoal({ id: 'hr', agentName: 'HR', agentFriendlyDescription: 'Manage PTO' }),
+      makeGoal({ id: 'flight', name: 'Flight', title: 'Book flights' }),
+      makeGoal({ id: 'hr', name: 'HR', title: 'Manage PTO' }),
     ];
     const msg = buildOrchestratorSystemMessage(goals);
     expect(msg).toContain('"flight"');
@@ -101,7 +105,7 @@ describe('formatHistoryForOrchestrator', () => {
     const result = formatHistoryForOrchestrator(history);
     expect(result).toContain('User: Find flights');
     expect(result).toContain('Agent: Found 3 options');
-    expect(result).toContain('Recent Conversation');
+    expect(result).toContain('conversation');
   });
 
   it('truncates long messages to 200 characters', () => {

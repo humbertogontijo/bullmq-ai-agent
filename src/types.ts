@@ -1,4 +1,4 @@
-import type { Static, TObject } from '@sinclair/typebox';
+import { Type, type Static, type TObject } from '@sinclair/typebox';
 import type { ConnectionOptions } from 'bullmq';
 
 // ---------------------------------------------------------------------------
@@ -15,15 +15,12 @@ export interface AgentTool<T extends TObject = TObject> {
   ) => Promise<Record<string, unknown>>;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type AnyAgentTool = AgentTool<any>;
-
 export interface AgentGoal {
   id: string;
-  agentName: string;
-  agentFriendlyDescription: string;
+  name: string;
+  title: string;
   description: string;
-  tools: AnyAgentTool[];
+  tools: AgentTool<any>[];
   systemMessage?: string;
 }
 
@@ -50,13 +47,120 @@ export interface SerializedToolCall {
 // Job data types
 // ---------------------------------------------------------------------------
 
-export type JobType = 'prompt' | 'confirm' | 'end-chat';
+export type JobType = 'prompt' | 'command' | 'end-chat';
+
+export const HUMAN_IN_THE_LOOP_TOOL_NAME = 'human_in_the_loop';
+
+/**
+ * LLM tool definition for human-in-the-loop. Registered with the model when
+ * `humanInTheLoop` is enabled so the agent can pause and request live operator input.
+ */
+export const HUMAN_INPUT_TOOL_DEFINITION = {
+  type: 'function' as const,
+  function: {
+    name: HUMAN_IN_THE_LOOP_TOOL_NAME,
+    description:
+      'Ask a human operator for help when you need clarification, are unsure, or the request is outside your goal.',
+    parameters: Type.Object({
+      question: Type.String({ description: 'The question or prompt to show the operator/user' }),
+      context: Type.Optional(Type.String({ description: 'Optional context to help the operator understand (e.g. what you are unsure about)' })),
+    }),
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Interrupt types (returned when status is 'interrupted')
+// ---------------------------------------------------------------------------
+
+export type InterruptType = 'tool_approval' | 'human_input';
+
+/** One pending action when status is 'interrupted' (tool execution or human_in_the_loop). */
+export interface ActionRequest {
+  /** Tool call id from the LLM response. */
+  id: string;
+  /** Tool name (e.g. 'SearchFlights' or 'human_in_the_loop'). */
+  name: string;
+  /** Tool arguments from the LLM. */
+  arguments: Record<string, unknown>;
+  /** Human-readable description of what this action does. */
+  description: string;
+}
+
+export interface Interrupt {
+  /** Discriminator: 'tool_approval' for pending tool calls, 'human_input' for operator requests. */
+  type: InterruptType;
+  actionRequests: ActionRequest[];
+  /** Goal id (always present in multi-goal mode). */
+  goalId?: string;
+  /**
+   * When interrupting for human_in_the_loop, the AI message with tool_calls is not persisted in
+   * history (to avoid orphan tool_calls when concatenating job histories). It is stored here so
+   * the next run can prepend it before the ToolMessage when the operator responds.
+   */
+  pendingMessages?: SerializedMessage[];
+}
+
+// ---------------------------------------------------------------------------
+// Resume commands (sent via sendCommand to continue after 'interrupted')
+// ---------------------------------------------------------------------------
+
+/**
+ * Detail for a single tool's approval/rejection. Use when you want to provide
+ * feedback on rejection (e.g. "Too expensive, find cheaper options").
+ */
+export interface ToolApprovalDetail {
+  approved: boolean;
+  feedback?: string;
+}
+
+/**
+ * Approve or reject pending tool calls.
+ * Keys are tool names; values are `true` (approve), `false` (reject),
+ * or a `ToolApprovalDetail` for rejection with feedback.
+ *
+ * @example
+ * { type: 'tool_approval', approved: { SearchFlights: true, BookFlight: false } }
+ * { type: 'tool_approval', approved: { BookFlight: { approved: false, feedback: 'Too expensive' } } }
+ */
+export interface ToolApprovalCommand {
+  type: 'tool_approval';
+  payload: { approved: Record<string, boolean | ToolApprovalDetail> };
+}
+
+/**
+ * Respond to a human_in_the_loop request by tipping the agent. The response is
+ * passed as the tool result; the agent uses it to formulate its reply.
+ *
+ * @example
+ * { type: 'hitl_response', response: 'The answer is 42' }
+ */
+export interface HumanResponseCommand {
+  type: 'hitl_response';
+  payload: { message: string };
+}
+
+/**
+ * Respond to a human_in_the_loop request by sending a message directly as the agent.
+ * No model call is made — this text becomes the agent's reply verbatim.
+ *
+ * @example
+ * { type: 'hitl_direct_reply', message: 'Here is your answer: 42' }
+ */
+export interface HumanDirectReplyCommand {
+  type: 'hitl_direct_reply';
+  payload: { message: string };
+}
+
+/** Discriminated union for resuming after status 'interrupted'. */
+export type ResumeCommand = ToolApprovalCommand | HumanResponseCommand | HumanDirectReplyCommand;
 
 /** Data for orchestrator / single-agent queue jobs (created by the client). */
 export interface OrchestratorJobData {
   sessionId: string;
   type: JobType;
   prompt?: string;
+  /** When type === 'command', the resume payload for human-in-the-loop. */
+  command?: ResumeCommand;
   /**
    * When set with type === 'prompt', use this goal only (no LLM routing).
    * Lets the webapp send "run conversation goal" vs "run analyze goal" explicitly.
@@ -86,8 +190,14 @@ export interface AgentChildJobData {
   sessionId: string;
   goalId: string;
   prompt?: string;
-  /** Carried over from a previous awaiting-confirm result on `confirm`. */
+  /** Carried over when resuming from status 'interrupted' (tool approval). */
   toolCalls?: ToolCall[];
+  /** Resume payload when resuming from interrupted. */
+  resume?: ResumeCommand;
+  /** Tool call id for human_in_the_loop when resuming; content comes from the resume command. */
+  humanInputToolCallId?: string;
+  /** Pending AI messages to restore when resuming from human_in_the_loop (avoids orphan tool_calls). */
+  pendingMessages?: SerializedMessage[];
   /** Optional prefix messages (passed from orchestrator job when present). */
   initialMessages?: SerializedMessage[];
   /** Optional context passed through to tool handlers. */
@@ -102,17 +212,11 @@ export interface AgentChildJobData {
 // Job result types
 // ---------------------------------------------------------------------------
 
-export interface AgentChildResult {
-  goalId: string;
-  /** Delta: only the new messages produced during this agent step. */
-  messages: SerializedMessage[];
-  status: 'complete' | 'awaiting-confirm';
-}
-
 /**
- * Unified result stored by the orchestrator step.
- * In single-goal mode this IS the agent result.
- * In multi-goal mode it wraps the aggregator output.
+ * Unified result type used everywhere: orchestrator steps, agent child jobs,
+ * and aggregator output. In single-goal mode this IS the agent result.
+ * In multi-goal mode the aggregator populates `childrenValues` with
+ * per-agent results.
  *
  * `routing` means the orchestrator dispatched work to agent children
  * and the real result will arrive from the aggregator — clients should
@@ -122,11 +226,13 @@ export interface StepResult {
   /** New messages produced during this step only (delta, not cumulative). */
   history: SerializedMessage[];
   goalId?: string;
-  toolCalls?: ToolCall[];
-  agentResults?: Record<string, AgentChildResult>;
-  status: 'active' | 'awaiting-confirm' | 'ended' | 'routing';
+  status: 'active' | 'interrupted' | 'ended' | 'routing';
   /** Set when status is 'routing' — the aggregator job ID to follow. */
   routingJobId?: string;
+  /** Set when status is 'interrupted': use sendCommand() to approve/reject or reply. */
+  interrupts?: Interrupt[];
+  /** Per-agent results in multi-goal mode (populated by the aggregator). */
+  childrenValues?: Record<string, StepResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -195,6 +301,13 @@ export interface AgentWorkerOptions {
    */
   llmConfig: AgentWorkerLlmConfig;
   goals: AgentGoal[];
+  /**
+   * When true, adds a built-in tool "human_in_the_loop" to every goal so the agent can
+   * pause and ask the user for clarification. When the agent calls it, the step returns
+   * status 'interrupted' with interrupts[].actionRequests containing the request; use
+   * sendCommand({ type: 'hitl_response', response: '...' }) to resume.
+   */
+  humanInTheLoop?: boolean;
 }
 
 export interface AgentClientOptions {

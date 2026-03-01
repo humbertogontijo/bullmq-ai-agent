@@ -3,7 +3,9 @@ import { Queue, QueueEvents } from 'bullmq';
 
 import {
   buildConversationHistory,
-  fetchSessionResults
+  expandAggregatorResult,
+  fetchAggregatorResultsWithChildren,
+  fetchSessionResults,
 } from './history.js';
 import type {
   AgentClientOptions,
@@ -11,6 +13,7 @@ import type {
   JobRetention,
   JobType,
   OrchestratorJobData,
+  ResumeCommand,
   SerializedMessage,
   StepResult,
 } from './types.js';
@@ -58,6 +61,10 @@ export class AgentClient {
     });
   }
 
+  /**
+   * Send a new user message. For human-in-the-loop (approve/reject tools or reply to
+   * human_in_the_loop), use sendCommand() instead.
+   */
   async sendPrompt(
     sessionId: string,
     prompt: string,
@@ -85,17 +92,32 @@ export class AgentClient {
     return this.resolveResult(job, options?.onProgress);
   }
 
-  async confirm(
+  /**
+   * Resume after the agent returned status 'interrupted'.
+   *
+   * @example
+   * // Approve tools:
+   * sendCommand(sessionId, { type: 'tool_approval', approved: { SearchFlights: true } })
+   *
+   * // Tip the agent (agent formulates reply):
+   * sendCommand(sessionId, { type: 'hitl_response', response: 'The answer is 42' })
+   *
+   * // Reply as the agent directly (no model call):
+   * sendCommand(sessionId, { type: 'hitl_direct_reply', message: 'Here is the answer.' })
+   */
+  async sendCommand(
     sessionId: string,
-    context?: Record<string, unknown>,
+    command: ResumeCommand,
     options?: {
-      /** Called when the job reports progress. Uses BullMQ job progress. */
+      context?: Record<string, unknown>;
+      /** Called when the job reports progress. */
       onProgress?: (progress: JobProgress) => void;
     },
   ): Promise<StepResult> {
     const job = await this.addOrchestratorJob(sessionId, {
-      type: 'confirm',
-      context,
+      type: 'command',
+      command,
+      ...(options?.context !== undefined && { context: options.context }),
     });
     return this.resolveResult(job, options?.onProgress);
   }
@@ -122,11 +144,11 @@ export class AgentClient {
   async getConversationHistory(
     sessionId: string,
   ): Promise<SerializedMessage[]> {
-    const [orchResults, aggResults] = await Promise.all([
+    const [orchResults, aggPairs] = await Promise.all([
       fetchSessionResults(this.orchestratorQueue, sessionId),
-      fetchSessionResults(this.aggregatorQueue, sessionId),
+      fetchAggregatorResultsWithChildren(this.aggregatorQueue, sessionId),
     ]);
-
+    const aggResults = aggPairs.map(([, r]) => r);
     return buildConversationHistory(orchResults, aggResults);
   }
 
@@ -151,13 +173,14 @@ export class AgentClient {
     extra: {
       type: JobType;
       prompt?: string;
+      command?: ResumeCommand;
       context?: Record<string, unknown>;
       goalId?: string;
       initialMessages?: SerializedMessage[];
       priority?: number;
       toolChoice?: string | Record<string, unknown> | 'auto' | 'any' | 'none';
     },
-  ): Promise<Job> {
+  ): Promise<Job<OrchestratorJobData>> {
     const { priority, ...jobData } = extra;
     const opts: { jobId: string; removeOnComplete: KeepJobs; removeOnFail: KeepJobs; priority?: number } = {
       jobId: `${sessionId}/${Date.now()}`,
@@ -224,6 +247,10 @@ export class AgentClient {
         }] : []),
       ],
     );
-    return typeof rawResult === 'string' ? JSON.parse(rawResult) : rawResult;
+    const result: StepResult =
+      typeof rawResult === 'string' ? JSON.parse(rawResult) : rawResult;
+    // Aggregator return value is stored without childrenValues; expand from flow.
+    const children = await aggJob.getChildrenValues<StepResult>();
+    return expandAggregatorResult(result, children ?? {});
   }
 }

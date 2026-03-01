@@ -1,82 +1,96 @@
 import type { AgentGoal, SerializedMessage } from './types.js';
 
-/**
- * Build the system message for a single agent working toward a specific goal.
- */
+// ---------------------------------------------------------------------------
+// Prompt constants (used by worker.ts when building tool messages)
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_REJECTION = 'The user declined to run this action.';
+
+export const HUMAN_INPUT_TIP_PREFIX =
+  'Operator tip (relay this to the user as your reply): ';
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function today(): string {
+  return new Date().toLocaleDateString('en-US', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Agent system message
+// ---------------------------------------------------------------------------
+
 export function buildAgentSystemMessage(
   goal: AgentGoal,
-  multiGoalMode: boolean,
+  humanInTheLoop = false,
 ): string {
   const lines: string[] = [];
 
-  lines.push(
-    'You are an AI agent that helps the user accomplish the described goal using the available tools.',
-    `The current date is ${new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}.`,
-    '',
-  );
-
-  if (goal.systemMessage) {
-    lines.push(goal.systemMessage, '');
-  }
-
-  lines.push('=== Goal ===', goal.description, '');
-
-  lines.push(
-    '=== Instructions ===',
-    'Use the available tools to accomplish the goal described above.',
-    'When you have all required arguments for a tool, call it.',
-    'When you need more information from the user, ask a clear question.',
-    'Carry forward arguments between related tool calls (e.g. same customer ID across tools).',
-  );
-
-  if (multiGoalMode) {
+  if (humanInTheLoop) {
     lines.push(
+      `You are ${goal.name}. Today is ${today()}.`,
       '',
-      '=== Multi-Agent Mode ===',
-      'You are one of several specialist agents. Focus only on your area of expertise.',
-      'If the user asks about something outside your tools, say so briefly.',
+      `Goal: ${goal.title}`,
+      goal.description,
+      '',
+    );
+    if (goal.systemMessage) {
+      lines.push(goal.systemMessage, '');
+    }
+    lines.push(
+      'Use tools to help with requests related to your goal.',
+      'For off-topic requests, call human_in_the_loop to redirect or get guidance.',
+      'When human_in_the_loop returns a response, relay it to the user as your answer.',
+    );
+  } else {
+    lines.push(
+      `You are an AI agent. Today is ${today()}.`,
+      '',
+    );
+    if (goal.systemMessage) {
+      lines.push(goal.systemMessage, '');
+    }
+    lines.push(
+      `Goal: ${goal.description}`,
+      '',
+      'Use tools to accomplish the goal. Call a tool when you have the required arguments. Ask the user when you need more information.',
     );
   }
 
   return lines.join('\n');
 }
 
-/**
- * Build the system message for the orchestrator that routes user prompts
- * to the appropriate agent(s).
- */
+// ---------------------------------------------------------------------------
+// Orchestrator system message (multi-goal routing)
+// ---------------------------------------------------------------------------
+
 export function buildOrchestratorSystemMessage(
   goals: AgentGoal[],
 ): string {
-  const agentDescriptions = goals
-    .map(
-      (g) =>
-        `- id: "${g.id}" | name: "${g.agentName}" | description: "${g.agentFriendlyDescription}"`,
-    )
+  const agentList = goals
+    .map((g) => `- "${g.id}": ${g.title}`)
     .join('\n');
 
   return [
-    'You are a routing agent. Your job is to decide which specialist agents should handle the user\'s request.',
-    `The current date is ${new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}.`,
+    `You are a routing agent. Today is ${today()}.`,
     '',
-    '=== Available Agents ===',
-    agentDescriptions,
+    'Agents:',
+    agentList,
     '',
-    '=== Instructions ===',
-    'Given the user\'s message and conversation history, return a JSON array of agent IDs that should handle the request.',
-    'Choose one or more agents based on what the user is asking for.',
-    'If the user\'s intent is unclear, include all agents that could be relevant.',
-    '',
-    'Respond with ONLY a valid JSON array of agent ID strings. Examples:',
-    '["flight"]',
-    '["flight", "hr"]',
-    '["hr"]',
+    'Return a JSON array of agent IDs that should handle the user\'s request.',
+    'Example: ["flight"] or ["flight","hr"]',
   ].join('\n');
 }
 
-/**
- * Format conversation history into a compact string for the orchestrator.
- */
+// ---------------------------------------------------------------------------
+// History formatting for orchestrator context
+// ---------------------------------------------------------------------------
+
 export function formatHistoryForOrchestrator(
   history: SerializedMessage[],
 ): string {
@@ -92,5 +106,5 @@ export function formatHistoryForOrchestrator(
     return `${role}: ${text}`;
   });
 
-  return ['=== Recent Conversation ===', ...lines].join('\n');
+  return ['Recent conversation:', ...lines].join('\n');
 }

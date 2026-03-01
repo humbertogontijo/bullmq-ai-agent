@@ -9,7 +9,7 @@ Define goals and tools, connect any LLM, and let BullMQ handle the rest — para
 - **Single or Multi-Agent** — one goal runs directly; multiple goals are automatically routed and executed in parallel via BullMQ Flows
 - **Provider Agnostic** — works with any LLM supported by LangChain (`openai`, `anthropic`, `google-genai`, etc.)
 - **Persistent Sessions** — conversations survive restarts; resume any session from where it left off
-- **Tool Confirmation** — optionally require user approval before executing tool calls
+- **Human-in-the-loop** — require user approval before executing tool calls; optional live-operator mode via `human_in_the_loop`: operator can tip the agent or send the reply as the agent
 - **Job Progress** — optional progress callbacks (prompt-read, thinking, typing, etc.) via BullMQ `job.updateProgress()`
 - **Redis-Backed** — all state lives in Redis via BullMQ; no additional database needed
 - **Type-Safe Tools** — define tool schemas with [TypeBox](https://github.com/sinclairzx81/typebox) for full type inference
@@ -103,8 +103,8 @@ import type { AgentGoal } from 'bullmq-ai-agent';
 
 const flightGoal: AgentGoal = {
   id: 'flight-booking',
-  agentName: 'Flight Finder',
-  agentFriendlyDescription: 'Search and book flights to any destination',
+  name: 'Flight Finder',
+  title: 'Search and book flights to any destination',
   description:
     'Help the user find and book flights. ' +
     '1. Use SearchFlights to find available options. ' +
@@ -146,10 +146,32 @@ let result = await client.sendPrompt(sessionId, 'Find flights from SFO to JFK on
   onProgress: (p) => console.log(p.phase), // 'prompt-read' | 'thinking' | 'typing' | ...
 });
 
-// If the agent wants to call a tool (confirmation is always required)
-if (result.status === 'awaiting-confirm') {
-  // Inspect result.toolCalls, then approve:
-  result = await client.confirm(sessionId);
+// Human-in-the-loop: when status is 'interrupted', use sendCommand() to resume
+if (result.status === 'interrupted' && result.interrupts?.length) {
+  const interrupt = result.interrupts[0];
+
+  if (interrupt.type === 'human_input') {
+    // Operator tips the agent (agent formulates reply from the tip):
+    result = await client.sendCommand(sessionId, {
+      type: 'hitl_response',
+      response: 'User said: yes, proceed',
+    });
+
+    // Or operator sends a reply directly as the agent (no model call):
+    result = await client.sendCommand(sessionId, {
+      type: 'hitl_direct_reply',
+      message: 'Here is the answer.',
+    });
+  } else {
+    // Approve or reject pending tool calls:
+    const approved = Object.fromEntries(
+      interrupt.actionRequests.map((a) => [a.name, true]),
+    );
+    result = await client.sendCommand(sessionId, {
+      type: 'tool_approval',
+      approved,
+    });
+  }
 }
 
 // Retrieve full conversation history (survives restarts)
@@ -189,6 +211,7 @@ new AgentWorker(options: AgentWorkerOptions)
 | `connection`        | `ConnectionOptions` | Redis connection (from BullMQ)                                    |
 | `llmConfig`        | `(options) => Promise<AgentWorkerLlmConfigData>` | Called each step; return config for `initChatModel` (model, apiKey, etc.) |
 | `goals`             | `AgentGoal[]`       | One or more agent goals with tools                                |
+| `humanInTheLoop`    | `boolean?`          | When true, adds a `human_in_the_loop` tool so the agent can pause for a live operator to tip it or send the reply as the agent |
 
 
 **Methods:**
@@ -213,29 +236,56 @@ new AgentClient(options: AgentClientOptions)
 
 **Methods:**
 
-- `sendPrompt(sessionId, prompt, options?): Promise<StepResult>` — Send a user message. Options: `goalId`, `context`, `initialMessages`, `priority`, `toolChoice`, `autoExecuteTools`, `onProgress(progress)` (called with job progress: prompt-read, thinking, typing, etc.).
-- `confirm(sessionId, context?, options?): Promise<StepResult>` — Approve pending tool calls. Options: `onProgress(progress)`.
+- `sendPrompt(sessionId, prompt, options?): Promise<StepResult>` — Send a new user message. Options: `goalId`, `context`, `initialMessages`, `priority`, `toolChoice`, `autoExecuteTools`, `onProgress(progress)`.
+- `sendCommand(sessionId, command, options?): Promise<StepResult>` — Resume after status `interrupted`. The `command` is a discriminated union (`ResumeCommand`):
+  - `{ type: 'tool_approval', approved: { [toolName]: true | false } }` — approve/reject tools
+  - `{ type: 'hitl_response', response: '...' }` — tip the agent (agent formulates reply)
+  - `{ type: 'hitl_direct_reply', message: '...' }` — send as the agent (no model call)
 - `endChat(sessionId): Promise<StepResult>` — End the conversation
 - `getConversationHistory(sessionId): Promise<SerializedMessage[]>` — Get full history
 - `close(): Promise<void>` — Close client connections
 
 ### `StepResult`
 
-Returned by `sendPrompt`, `confirm`, and `endChat`:
+Returned by `sendPrompt`, `sendCommand`, and `endChat`:
 
 ```typescript
 interface StepResult {
   history: SerializedMessage[];       // New messages from this step
-  goalId?: string;                    // Active goal (single-agent mode)
-  toolCalls?: ToolCall[];             // Pending tool calls (when awaiting-confirm)
-  agentResults?: Record<string, AgentChildResult>; // Per-agent results (multi-agent mode)
-  status: 'active' | 'awaiting-confirm' | 'ended' | 'routing';
+  goalId?: string;                    // Active goal
+  status: 'active' | 'interrupted' | 'ended' | 'routing';
+  interrupts?: Interrupt[];           // When status is 'interrupted': pending actions
+  childrenValues?: Record<string, StepResult>; // Per-agent results (multi-agent mode)
 }
+
+interface Interrupt {
+  type: 'tool_approval' | 'human_input'; // What kind of interrupt
+  actionRequests: ActionRequest[];        // Each has id, name, arguments, description
+  goalId?: string;                        // Goal id in multi-goal mode
+}
+```
+
+### `ResumeCommand`
+
+Discriminated union passed to `sendCommand` to resume after an interrupt:
+
+```typescript
+// Approve/reject tools
+{ type: 'tool_approval', approved: { SearchFlights: true, BookFlight: false } }
+
+// Reject with feedback
+{ type: 'tool_approval', approved: { BookFlight: { approved: false, feedback: 'Too expensive' } } }
+
+// Tip the agent (agent uses this to formulate reply)
+{ type: 'hitl_response', response: 'The answer is 42' }
+
+// Send as the agent directly (no model call)
+{ type: 'hitl_direct_reply', message: 'Here is your answer.' }
 ```
 
 ### `JobProgress`
 
-When using `onProgress` with `sendPrompt` or `confirm`, the callback receives objects of this shape (from BullMQ job progress):
+When using `onProgress` with `sendPrompt` or `sendCommand`, the callback receives objects of this shape (from BullMQ job progress):
 
 ```typescript
 interface JobProgress {
@@ -253,7 +303,7 @@ interface JobProgress {
 
 ## LLM Configuration
 
-`llmConfig` is called at the start of each orchestrator/agent step with `{ goalId?, context? }`. Return an object that LangChain's `[initChatModel](https://js.langchain.com/docs/how_to/chat_models_universal_init/)` accepts. Any provider with a `@langchain/*` package works:
+`llmConfig` is called at the start of each orchestrator/agent step with `{ goalId?, context? }`. Return an object that LangChain's [`initChatModel`](https://js.langchain.com/docs/how_to/chat_models_universal_init/) accepts. Any provider with a `@langchain/*` package works:
 
 ```typescript
 // Static config (same for every step)

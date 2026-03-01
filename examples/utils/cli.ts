@@ -5,12 +5,13 @@ import * as p from '@clack/prompts';
 
 import {
   deriveResponse,
-  deriveToolCalls,
   type AgentResponseEvent,
+  type HumanDirectReplyCommand,
+  type HumanResponseCommand,
   type JobProgress,
+  type ResumeCommand,
   type SerializedMessage,
   type StepResult,
-  type ToolCall,
 } from '../../src/index.js';
 
 const CONFIG_FILE = path.resolve(process.cwd(), '.agent.json');
@@ -71,6 +72,7 @@ export async function askApiKey(): Promise<string> {
   return trimmed;
 }
 
+/** Main chat: user sends a new message to the agent. */
 export async function askInput(): Promise<string | null> {
   const input = await p.text({
     message: 'You',
@@ -87,6 +89,35 @@ export async function askInput(): Promise<string | null> {
   return trimmed;
 }
 
+/** Human-in-the-loop: operator tips the agent or sends a direct reply. Returns a ResumeCommand. */
+export async function askOperatorIntervention(): Promise<HumanResponseCommand | HumanDirectReplyCommand | null> {
+  const mode = await p.select({
+    message: 'Operator: how do you want to respond?',
+    options: [
+      { value: 'tip', label: 'Tip the agent (agent will use your text to formulate the reply)' },
+      { value: 'direct', label: 'Send as the agent (your text is shown as the agent\u2019s reply)' },
+      { value: 'skip', label: 'Skip / exit' },
+    ],
+  });
+
+  if (p.isCancel(mode) || mode === 'skip') return null;
+
+  const input = await p.text({
+    message: mode === 'tip' ? 'Tip for the agent' : 'Reply as the agent',
+    placeholder: 'Type your message, or exit to cancel',
+  });
+
+  if (p.isCancel(input)) return null;
+
+  const message = String(input).trim();
+  if (!message) return askOperatorIntervention();
+  if (message.toLowerCase() === 'exit' || message.toLowerCase() === 'quit') return null;
+
+  return mode === 'tip'
+    ? { type: 'hitl_response', payload: { message } }
+    : { type: 'hitl_direct_reply', payload: { message } };
+}
+
 export async function askConfirm(): Promise<boolean> {
   const answer = await p.confirm({
     message: 'Confirm tool execution?',
@@ -97,19 +128,31 @@ export async function askConfirm(): Promise<boolean> {
   return answer === true;
 }
 
+/** Check if any interrupt in the result is a human_input interrupt. */
+export function hasHumanInputInterrupt(result: StepResult): boolean {
+  if (result.interrupts?.some((i) => i.type === 'human_input')) return true;
+  if (result.childrenValues) {
+    for (const r of Object.values(result.childrenValues)) {
+      if (r.interrupts?.some((i) => i.type === 'human_input')) return true;
+    }
+  }
+  return false;
+}
+
 export function printResult(result: StepResult): void {
-  if (result.status === 'ended' || result.status === 'awaiting-confirm') return;
+  if (result.status === 'ended' || result.status === 'interrupted') return;
   for (const r of getResponses(result)) {
     p.log.message(`${r.text}`, { symbol: `[${r.goalId}]` });
   }
 }
 
 export function printToolCalls(result: StepResult): void {
-  const toolCalls = getToolCalls(result);
-  p.log.message('The agent wants to execute:');
-  for (const tc of toolCalls) {
-    p.log.message(`  ${tc.name} ${JSON.stringify(tc.args)}`, {
-      symbol: `[${tc.goalId}]`,
+  const actions = getAllActionRequests(result);
+  if (actions.length === 0) return;
+  p.log.message('Pending actions (use sendCommand to approve/reject or reply):');
+  for (const { goalId, name, description } of actions) {
+    p.log.message(`  [${goalId ?? result.goalId ?? '?'}] ${name}: ${description}`, {
+      symbol: '\u2022',
     });
   }
 }
@@ -155,9 +198,9 @@ export function closeInput(): void {
 export function getResponses(result: StepResult): AgentResponseEvent[] {
   const responses: AgentResponseEvent[] = [];
 
-  if (result.agentResults) {
-    for (const [goalId, r] of Object.entries(result.agentResults)) {
-      const text = deriveResponse(r.messages);
+  if (result.childrenValues) {
+    for (const [goalId, r] of Object.entries(result.childrenValues)) {
+      const text = deriveResponse(r.history);
       if (text) responses.push({ goalId, text });
     }
   }
@@ -177,17 +220,29 @@ export function getResponses(result: StepResult): AgentResponseEvent[] {
   return responses;
 }
 
-export function getToolCalls(result: StepResult): ToolCall[] {
-  const calls: ToolCall[] = [];
-  if (result.toolCalls) calls.push(...result.toolCalls);
-  if (result.agentResults) {
-    for (const [goalId, r] of Object.entries(result.agentResults)) {
-      if (r.status === 'awaiting-confirm') {
-        calls.push(...deriveToolCalls(r.messages, goalId));
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+interface ActionRequestWithGoalId {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+  description: string;
+  goalId?: string;
+}
+
+function getAllActionRequests(result: StepResult): ActionRequestWithGoalId[] {
+  const out: ActionRequestWithGoalId[] = [];
+  if (result.interrupts?.length) {
+    for (const i of result.interrupts) {
+      if (i.actionRequests?.length) {
+        out.push(...i.actionRequests.map((ar) => ({ ...ar, goalId: i.goalId })));
       }
     }
   }
-  return calls;
+  return out;
 }
 
 // ---------------------------------------------------------------------------

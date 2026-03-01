@@ -1,10 +1,10 @@
 import type { Queue } from 'bullmq';
 import type {
-  AgentChildResult,
   ToolCall,
   SerializedMessage,
   StepResult,
 } from './types.js';
+import { getGoalIdFromJobName } from './utils.js';
 
 // ---------------------------------------------------------------------------
 // Redis-level helpers: ZSCAN discovery + pipelined HGET
@@ -57,6 +57,62 @@ export async function fetchSessionResults(
   return pairs.map(([, result]) => result);
 }
 
+export function expandAggregatorResult(
+  base: StepResult,
+  rawChildren: Record<string, StepResult>,
+): StepResult {
+  if (!rawChildren || typeof rawChildren !== 'object' || Object.keys(rawChildren).length === 0) {
+    return base;
+  }
+  const childrenValues: Record<string, StepResult> = {};
+  for (const [key, value] of Object.entries(rawChildren)) {
+    const goalId = getGoalIdFromJobName(key);
+    if (value && typeof value === 'object') {
+      childrenValues[goalId] = value as StepResult;
+    }
+  }
+  const interrupts = Object.values(childrenValues)
+    .filter((r) => r.status === 'interrupted' && r.interrupts?.length)
+    .flatMap((r) => r.interrupts!);
+  return {
+    ...base,
+    childrenValues,
+    ...(interrupts.length > 0 && { interrupts }),
+  };
+}
+
+/**
+ * Fetch aggregator job results and expand each with childrenValues from the flow.
+ * Use this instead of fetchSessionResults for the aggregator queue so we don't
+ * rely on storing childrenValues in Redis (avoids duplicating child job data).
+ * Returns [jobId, StepResult] pairs sorted chronologically (oldest first).
+ */
+export async function fetchAggregatorResultsWithChildren(
+  aggQueue: Queue,
+  sessionId: string,
+): Promise<[string, StepResult][]> {
+  const jobIds = await discoverSessionJobs(aggQueue, sessionId);
+  if (!jobIds.length) return [];
+
+  const pairs: [string, StepResult][] = [];
+  for (const jobId of jobIds) {
+    const job = await aggQueue.getJob(jobId);
+    if (!job) continue;
+    const base = (job.returnvalue as StepResult) ?? {};
+    let expanded = base;
+    try {
+      const raw = await job.getChildrenValues<StepResult>();
+      if (raw && typeof raw === 'object' && Object.keys(raw).length > 0) {
+        expanded = expandAggregatorResult(base, raw);
+      }
+    } catch {
+      // flow may have no children or job may not be a parent
+    }
+    pairs.push([jobId, expanded]);
+  }
+  return pairs;
+}
+
 /**
  * Find the most recent non-routing StepResult across both queues.
  * Used by the orchestrator to retrieve the previous interaction's state.
@@ -68,7 +124,7 @@ export async function findLatestResult(
 ): Promise<StepResult | null> {
   const [orchPairs, aggPairs] = await Promise.all([
     fetchResultsWithIds(orchQueue, sessionId),
-    fetchResultsWithIds(aggQueue, sessionId),
+    fetchAggregatorResultsWithChildren(aggQueue, sessionId),
   ]);
 
   const all = [...orchPairs, ...aggPairs].sort(
@@ -151,7 +207,7 @@ export function extractAgentMessages(
 ): SerializedMessage[] {
   const messages: SerializedMessage[] = [];
   for (const result of aggResults) {
-    const delta = result?.agentResults?.[goalId]?.messages;
+    const delta = result?.childrenValues?.[goalId]?.history;
     if (delta?.length) {
       messages.push(...delta);
     }
@@ -165,7 +221,7 @@ export function extractAgentMessages(
  *
  * - Orchestrator results provide user prompts (routing) and single-goal deltas.
  * - Aggregator results provide per-agent conversation deltas (including tool
- *   calls and responses) from `agentResults[goalId].messages`.
+ *   calls and responses) from `childrenValues[goalId].history`.
  *
  * In multi-goal mode, human messages from per-agent deltas are omitted since
  * the user prompt is already included from the orchestrator routing result.
@@ -185,10 +241,10 @@ export function buildConversationHistory(
       messages.push(...orch.history);
     }
 
-    if (agg?.agentResults) {
-      for (const result of Object.values(agg.agentResults)) {
-        if (!result.messages?.length) continue;
-        for (const m of result.messages) {
+    if (agg?.childrenValues) {
+      for (const child of Object.values(agg.childrenValues)) {
+        if (!child.history?.length) continue;
+        for (const m of child.history) {
           if (m.role !== 'human') {
             messages.push(m);
           }
@@ -235,13 +291,13 @@ export function deriveToolCalls(
   return [];
 }
 
-/** Build routing context from agentResults (replaces mergeAgentHistories). */
+/** Build routing context from childrenValues for the orchestrator's next routing decision. */
 export function deriveRoutingHistory(
-  agentResults: Record<string, AgentChildResult>,
+  childrenValues: Record<string, StepResult>,
 ): SerializedMessage[] {
   const merged: SerializedMessage[] = [];
-  for (const [goalId, result] of Object.entries(agentResults)) {
-    const response = deriveResponse(result.messages);
+  for (const [goalId, result] of Object.entries(childrenValues)) {
+    const response = deriveResponse(result.history);
     if (response) {
       merged.push({ role: 'ai', content: `[${goalId}] ${response}` });
     }
