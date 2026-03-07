@@ -1,6 +1,6 @@
 {
   "name": "bullmq-ai-agent",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "AI agent library using BullMQ Flows for parallel multi-agent orchestration with LangChain",
   "type": "module",
   "main": "dist/index.js",
@@ -54,8 +54,7 @@
     "@langchain/textsplitters": "^1.0.1",
     "bullmq": "^5.70.4",
     "ioredis": "5.9.3",
-    "langchain": "^1.2.30",
-    "zod": "^3.23.8"
+    "langchain": "^1.2.30"
   },
   "devDependencies": {
     "@clack/prompts": "^1.1.0",

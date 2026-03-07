@@ -1,13 +1,23 @@
 import { tool } from "@langchain/core/tools";
 import type { LangGraphRunnableConfig } from "@langchain/langgraph";
-import { z } from "zod";
 import type { RunContext } from "../../options.js";
 import type { VectorStoreProvider } from "../../rag/index.js";
 
-const schema = z.object({
-  query: z.string().describe("Search query for the knowledge base"),
-  k: z.number().optional().default(5).describe("Number of results to return"),
-});
+const schema = {
+  type: "object" as const,
+  properties: {
+    query: {
+      type: "string" as const,
+      description: "Search query for the knowledge base",
+    },
+    k: {
+      type: "number" as const,
+      description: "Number of results to return",
+      default: 5,
+    },
+  },
+  required: ["query"],
+};
 
 /**
  * Creates the RAG search tool. When getVectorStoreForAgent is provided (e.g. from agent worker),

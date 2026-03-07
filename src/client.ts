@@ -12,7 +12,7 @@ export type MessageRole = "user" | "assistant" | "system";
 
 /** Progress payload from BullMQ job (worker calls job.updateProgress). */
 export interface JobProgress {
-  stage?: string;
+  stage: string;
   [key: string]: unknown;
 }
 
