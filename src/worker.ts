@@ -8,7 +8,7 @@ import {
   RedisConnection,
   isRedisInstance,
   type ConnectionOptions,
-  type QueueBaseOptions,
+  type QueueOptions,
 } from "bullmq";
 import type { Cluster, Redis } from "ioredis";
 import { compileGraph } from "./agent/compile.js";
@@ -25,7 +25,7 @@ import { IngestWorker } from "./workers/ingestWorker.js";
 import { ResumeWorker } from "./workers/resumeWorker.js";
 import { ToolsWorker } from "./workers/toolsWorker.js";
 
-export interface BullMQAgentWorkerOptions extends QueueBaseOptions {
+export interface BullMQAgentWorkerOptions extends QueueOptions {
   /** Redis connection for RAG/document vector store only. If omitted, uses connection (queues/checkpointer use connection). */
   documentConnection?: ConnectionOptions;
   /** Goals: id + systemPrompt; when a run/resume sets goal to an id, that goal's systemPrompt is used for the model. */
@@ -47,7 +47,7 @@ export class BullMQAgentWorker {
   private readonly documentConnection: ConnectionOptions | undefined;
   private vectorStoreProvider!: VectorStoreProvider;
   private checkpointer!: RedisSaver;
-  private readonly options: Omit<QueueBaseOptions, "connection">;
+  private readonly options: Omit<QueueOptions, "connection">;
   private readonly goals: Goal[] | undefined;
   private readonly agentSystemPrompt?: (agentId: string) => Promise<SystemMessageFields[]>;
   private readonly embeddingModelOptions: ModelOptions;
@@ -76,7 +76,7 @@ export class BullMQAgentWorker {
   async start(): Promise<void> {
     // Queues and checkpointer: use connection only
     let queueClient: Redis | Cluster;
-    let queueOptions: QueueBaseOptions;
+    let queueOptions: QueueOptions;
     if (isRedisInstance(this.connection)) {
       queueClient = this.connection;
       queueOptions = { ...this.options, connection: queueClient };

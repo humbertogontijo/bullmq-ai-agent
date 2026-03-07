@@ -1,5 +1,5 @@
 import type { StoredMessage } from "@langchain/core/messages";
-import type { Queue, QueueBaseOptions } from "bullmq";
+import type { Queue, QueueOptions } from "bullmq";
 import { QueueEvents } from "bullmq";
 import type { ModelOptions } from "./options.js";
 import { QUEUE_NAMES } from "./options.js";
@@ -57,14 +57,14 @@ const defaultWaitTtl = 120_000; // 2 minutes
  * Call start() to open queue connections; call close() when done so connections are not opened/closed per call.
  */
 export class BullMQAgentClient {
-  private readonly options: QueueBaseOptions;
+  private readonly options: QueueOptions;
   private readonly agentQueue: Queue<AgentJobData>;
   private readonly aggregatorQueue: Queue<AggregatorJobData>;
   private readonly ingestQueue: Queue<IngestJobData>;
   private readonly agentQueueEvents: QueueEvents;
   private readonly aggregatorQueueEvents: QueueEvents;
 
-  constructor(options: QueueBaseOptions) {
+  constructor(options: QueueOptions) {
     this.options = options;
     this.agentQueue = createAgentQueue({ ...this.options });
     this.aggregatorQueue = createAggregatorQueue({ ...this.options });

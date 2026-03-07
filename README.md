@@ -191,7 +191,7 @@ If `ttl` is exceeded on `runAndWait` or `resumeAndWait`, the wait fails (the job
 
 | Option | Type | Description |
 |--------|------|-------------|
-| `connection` | `QueueBaseOptions` | Redis connection (BullMQ). Client and worker must use the same connection and `prefix`. |
+| `connection` | `QueueOptions` | Redis connection (BullMQ). Client and worker must use the same connection and `prefix`. |
 | `prefix?` | `string` | Queue/key prefix (e.g. `QUEUE_PREFIX` env). Defaults to no prefix; use the same value as the client. |
 | `documentConnection?` | `ConnectionOptions` | Redis for vector store; defaults to `connection`. |
 | `goals?` | `Goal[]` | Goals with `id` and `systemPrompt`. |
