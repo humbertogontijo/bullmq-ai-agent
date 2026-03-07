@@ -1,6 +1,6 @@
 {
   "name": "bullmq-ai-agent",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "description": "AI agent library using BullMQ Flows for parallel multi-agent orchestration with LangChain",
   "type": "module",
   "main": "dist/index.js",
@@ -12,18 +12,16 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "examples"
   ],
   "scripts": {
     "build": "tsc",
-    "dev": "tsc --watch",
     "lint": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run build",
-    "example:single": "tsx examples/single-agent.ts",
-    "example:multi": "tsx examples/multi-agent.ts",
-    "example:rag": "tsx examples/rag-agent.ts"
+    "preexample": "npm run build && npm install .",
+    "example": "tsx examples/cli.ts"
   },
   "keywords": [
     "bullmq",
@@ -44,44 +42,26 @@
   "author": "humbertogontijo",
   "license": "MIT",
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "dependencies": {
-    "@langchain/classic": "^1.0.21",
-    "@langchain/community": "^1.1.20",
+    "@langchain/classic": "^1.0.22",
     "@langchain/cohere": "^1.0.4",
-    "@langchain/core": "^1.1.29",
-    "@langchain/openai": "^1.2.11",
+    "@langchain/community": "^1.1.22",
+    "@langchain/core": "^1.1.31",
+    "@langchain/openai": "^1.2.12",
     "@langchain/redis": "^1.1.0",
     "@langchain/textsplitters": "^1.0.1",
-    "@sinclair/typebox": "^0.34.9",
-    "bullmq": "^5.70.1",
-    "cheerio": "^1.2.0",
-    "langchain": "^1.2.28",
-    "redis": "^4.6.13"
+    "bullmq": "^5.70.4",
+    "ioredis": "5.9.3",
+    "langchain": "^1.2.30",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
-    "@clack/prompts": "^1.0.1",
-    "@types/node": "^25.3.3",
+    "@clack/prompts": "^1.1.0",
+    "@types/node": "^25.3.5",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vitest": "^4.0.18"
-  },
-  "peerDependencies": {
-    "ioredis": "^5.10.0"
-  },
-  "peerDependenciesMeta": {
-    "ioredis": {
-      "optional": true
-    },
-    "@langchain/anthropic": {
-      "optional": true
-    },
-    "@langchain/google-genai": {
-      "optional": true
-    },
-    "@langchain/cohere": {
-      "optional": true
-    }
   }
 }

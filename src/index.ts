@@ -1,49 +1,35 @@
-export { AgentWorker } from './worker.js';
-export { AgentClient } from './client.js';
-export { deriveResponse, deriveToolCalls } from './history.js';
-export { waitForJobWithProgress } from './waitWithProgress.js';
-export type { ProgressSource } from './waitWithProgress.js';
+/**
+ * BullMQ-Powered AI Agent (library)
+ *
+ * Invoke the agent: use BullMQAgentClient (run, resume, ingest).
+ * Process jobs: use BullMQAgentWorker (starts agent, tools, subagents, ingest workers).
+ *
+ * Example CLI: npm run example  (or npx tsx examples/cli.ts)
+ */
 
-export type { SessionConfig } from './sessionConfig.js';
-
-export {
-  ORCHESTRATOR_QUEUE,
-  AGENT_QUEUE,
-  AGGREGATOR_QUEUE,
-  DOCUMENT_QUEUE,
-  getQueueName,
-  HUMAN_IN_THE_LOOP_TOOL_NAME,
-} from './types.js';
+export { BullMQAgentClient } from "./client.js";
 export type {
-  ActionRequest,
-  AgentTool,
-  AgentGoal,
-  AgentWorkerOptions,
-  AgentWorkerLogger,
-  AgentClientOptions,
-  AgentResponseEvent,
-  DocumentJobData,
-  DocumentSource,
-  EmbeddingConfig,
-  HumanDirectReplyCommand,
-  HumanResponseCommand,
-  Interrupt,
-  InterruptType,
-  JobProgress,
-  JobProgressPhase,
-  PromptAttachment,
-  AgentWorkerRagOptions,
-  JobRetention,
-  ToolApprovalCommand,
-  ToolApprovalDetail,
-  ToolCall,
-  SerializedMessage,
-  SerializedToolCall,
-  StepResult,
-  JobType,
-  OrchestratorJobData,
-  AgentChildJobData,
-  ResumeCommand,
-} from './types.js';
+  IngestDocument,
+  IngestOptions,
+  MessageRole,
+  ResumeOptions,
+  RunOptions,
+  RunResult
+} from "./client.js";
 
-export { getRAGIndexName } from './rag/vectorStore.js';
+export { BullMQAgentWorker } from "./worker.js";
+export type { BullMQAgentWorkerOptions } from "./worker.js";
+
+export type { AgentWorkerLogger, ModelOptions, RunContext } from "./options.js";
+export { createDefaultAgentWorkerLogger, QUEUE_NAMES } from "./options.js";
+
+export { compileGraph } from "./agent/compile.js";
+export type { Goal } from "./agent/orchestrator.js";
+export { createAgentQueue } from "./queues/agentQueue.js";
+export { createAggregatorQueue } from "./queues/aggregatorQueue.js";
+export { createIngestQueue } from "./queues/ingestQueue.js";
+export { createToolsQueue } from "./queues/toolsQueue.js";
+export type { AgentJobResult, AggregatorJobData, InterruptPayload, HumanInterruptPayload, AggregatorInterruptPayload } from "./queues/types.js";
+export { VectorStoreProvider, type VectorStoreProviderOptions } from "./rag/index.js";
+export { RedisVectorStore, type RedisVectorStoreConfig, type RedisAddOptions } from "./redis/RedisVectorStore.js";
+

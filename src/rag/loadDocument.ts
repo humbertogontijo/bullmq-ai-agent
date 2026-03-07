@@ -3,10 +3,10 @@
  * @see https://docs.langchain.com/oss/javascript/integrations/document_loaders
  */
 
-import { Document } from '@langchain/core/documents';
-import { CheerioWebBaseLoader } from '@langchain/community/document_loaders/web/cheerio';
 import { TextLoader } from '@langchain/classic/document_loaders/fs/text';
-import type { DocumentSource } from '../types.js';
+import { CheerioWebBaseLoader } from '@langchain/community/document_loaders/web/cheerio';
+import { Document } from '@langchain/core/documents';
+import { DocumentSource } from '../queues/types.js';
 
 /**
  * Load one or more Document(s) from a DocumentSource using LangChain document loaders.
@@ -19,34 +19,33 @@ export async function loadDocumentsFromSource(
 ): Promise<Document[]> {
   switch (source.type) {
     case 'url': {
-      const loader = new CheerioWebBaseLoader(source.url);
+      const loader = new CheerioWebBaseLoader(source.content);
       const docs = await loader.load();
       const extra = source.metadata ?? {};
       return docs.map((doc) =>
         new Document({
           pageContent: doc.pageContent,
-          metadata: { ...doc.metadata, source: source.url, ...extra },
+          metadata: { ...doc.metadata, source: source.content, ...extra },
         }),
       );
     }
     case 'file': {
-      const loader = new TextLoader(source.path);
+      const loader = new TextLoader(source.content);
       const docs = await loader.load();
       const extra = source.metadata ?? {};
       return docs.map((doc) =>
         new Document({
           pageContent: doc.pageContent,
-          metadata: { ...doc.metadata, source: source.path, ...extra },
+          metadata: { ...doc.metadata, source: source.content, ...extra },
         }),
       );
     }
     case 'text': {
       const metadata = { source: 'inline', ...(source.metadata ?? {}) };
-      return [new Document({ pageContent: source.text, metadata })];
+      return [new Document({ pageContent: source.content, metadata })];
     }
-    default:
-      throw new Error(
-        `Unknown document source type: ${(source as DocumentSource).type}`,
-      );
+    default: {
+      throw new Error(`Unknown document source type: ${source.type}`);
+    }
   }
 }

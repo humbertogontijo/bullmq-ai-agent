@@ -1,281 +1,208 @@
-import type { ConnectionOptions, Job, KeepJobs } from 'bullmq';
-import { Queue, QueueEvents } from 'bullmq';
+import type { StoredMessage } from "@langchain/core/messages";
+import type { Queue, QueueBaseOptions } from "bullmq";
+import { QueueEvents } from "bullmq";
+import type { ModelOptions } from "./options.js";
+import { QUEUE_NAMES } from "./options.js";
+import { createAgentQueue } from "./queues/agentQueue.js";
+import { createAggregatorQueue } from "./queues/aggregatorQueue.js";
+import { createIngestQueue } from "./queues/ingestQueue.js";
+import type { AgentJobData, AgentJobResult, AggregatorJobData, IngestJobData } from "./queues/types.js";
 
-import {
-  buildConversationHistory,
-  expandAggregatorResult,
-  fetchAggregatorResultsWithChildren,
-  fetchSessionResults,
-} from './history.js';
-import {
-  getSessionConfig as getSessionConfigStore,
-  setSessionConfig as setSessionConfigStore,
-  type SessionConfig,
-  type RedisLike,
-} from './sessionConfig.js';
-import type {
-  AgentClientOptions,
-  DocumentJobData,
-  DocumentSource,
-  JobProgress,
-  JobRetention,
-  JobType,
-  OrchestratorJobData,
-  PromptAttachment,
-  ResumeCommand,
-  SerializedMessage,
-  StepResult,
-} from './types.js';
-import {
-  AGENT_QUEUE,
-  AGGREGATOR_QUEUE,
-  DEFAULT_JOB_RETENTION,
-  DOCUMENT_QUEUE,
-  getQueueName,
-  ORCHESTRATOR_QUEUE,
-} from './types.js';
-import { waitForJobWithProgress } from './waitWithProgress.js';
+export type MessageRole = "user" | "assistant" | "system";
 
-// ---------------------------------------------------------------------------
-// AgentClient — session + agentId + prompt; addDocument when worker has RAG
-// ---------------------------------------------------------------------------
+export interface RunOptions {
+  /** Chat model (provider, model, apiKey). Pass apiKey from the caller (e.g. CLI); library does not read process.env. */
+  chatModelOptions: ModelOptions;
+  /** Goal id; when set, the goal's system prompt is used for the model (must match a goal id from BullMQAgentWorker options). */
+  goalId?: string;
+  /** Initial messages (e.g. [{ role: "user", content: "Hello" }]). */
+  messages: StoredMessage[];
+}
+
+/** Reserved for future options. */
+export interface ResumeOptions {
+
+}
+
+export interface IngestDocument {
+  type: 'url' | 'file' | 'text';
+  content: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface IngestOptions {
+  /** Agent id for which to ingest the document. */
+  agentId: string;
+  source: IngestDocument;
+}
+
+export interface RunResult {
+  agentId: string;
+  threadId: string;
+  jobId: string | undefined;
+}
+
+const defaultWaitTtl = 120_000; // 2 minutes
 
 /**
- * Client for sending prompts and managing sessions. Always requires agentId.
- * Use addDocument(agentId, source) when the worker is started with RAG.
+ * Client for invoking the BullMQ agent: start runs, resume after human-in-the-loop, and ingest documents for RAG.
+ * Call start() to open queue connections; call close() when done so connections are not opened/closed per call.
  */
-export class AgentClient {
-  private readonly connection: ConnectionOptions;
-  private readonly queuePrefix?: string;
-  private readonly orchestratorQueue: Queue;
-  private readonly aggregatorQueue: Queue;
-  private readonly orchestratorEvents: QueueEvents;
-  private readonly aggregatorEvents: QueueEvents;
-  private readonly agentEvents: QueueEvents;
-  private readonly documentQueue: Queue<DocumentJobData>;
-  private readonly documentEvents: QueueEvents;
-  private readonly retention: Required<JobRetention>;
-  private readonly keepResult: KeepJobs;
+export class BullMQAgentClient {
+  private readonly options: QueueBaseOptions;
+  private readonly agentQueue: Queue<AgentJobData>;
+  private readonly aggregatorQueue: Queue<AggregatorJobData>;
+  private readonly ingestQueue: Queue<IngestJobData>;
+  private readonly agentQueueEvents: QueueEvents;
+  private readonly aggregatorQueueEvents: QueueEvents;
 
-  constructor(options: AgentClientOptions) {
-    this.connection = options.connection;
-    this.queuePrefix = options.queuePrefix;
-    this.retention = { ...DEFAULT_JOB_RETENTION, ...options.jobRetention };
-    this.keepResult = { age: this.retention.age, count: this.retention.count };
-    const prefix = this.queuePrefix;
-    const orchQueue = getQueueName(prefix, ORCHESTRATOR_QUEUE);
-    const aggQueue = getQueueName(prefix, AGGREGATOR_QUEUE);
-    const agentQueue = getQueueName(prefix, AGENT_QUEUE);
-    const docQueueName = getQueueName(prefix, DOCUMENT_QUEUE);
-
-    this.orchestratorQueue = new Queue(orchQueue, {
-      connection: this.connection,
-    });
-    this.aggregatorQueue = new Queue(aggQueue, {
-      connection: this.connection,
-    });
-    this.orchestratorEvents = new QueueEvents(orchQueue, {
-      connection: this.connection,
-    });
-    this.aggregatorEvents = new QueueEvents(aggQueue, {
-      connection: this.connection,
-    });
-    this.agentEvents = new QueueEvents(agentQueue, {
-      connection: this.connection,
-    });
-    this.documentQueue = new Queue<DocumentJobData>(docQueueName, {
-      connection: this.connection,
-    });
-    this.documentEvents = new QueueEvents(docQueueName, {
-      connection: this.connection,
-    });
+  constructor(options: QueueBaseOptions) {
+    this.options = options;
+    this.agentQueue = createAgentQueue({ ...this.options });
+    this.aggregatorQueue = createAggregatorQueue({ ...this.options });
+    this.ingestQueue = createIngestQueue({ ...this.options });
+    this.agentQueueEvents = new QueueEvents(QUEUE_NAMES.AGENT, { ...this.options });
+    this.aggregatorQueueEvents = new QueueEvents(QUEUE_NAMES.AGGREGATOR, { ...this.options });
   }
 
-  /** Send a new user message for the given agent. */
-  async sendPrompt(
-    agentId: string,
-    sessionId: string,
-    prompt: string,
-    options?: {
-      attachments?: PromptAttachment[];
-      context?: Record<string, unknown>;
-      goalId?: string;
-      initialMessages?: SerializedMessage[];
-      priority?: number;
-      toolChoice?: string | Record<string, unknown> | 'auto' | 'any' | 'none';
-      sessionConfig?: SessionConfig;
-      onProgress?: (progress: JobProgress) => void;
-    },
-  ): Promise<StepResult> {
-    const job = await this.addOrchestratorJob(agentId, sessionId, {
-      type: 'prompt',
-      prompt,
-      ...options,
-    });
-    return this.resolveResult(job, options?.onProgress);
-  }
-
-  /** Resume after status 'interrupted' for the given agent. */
-  async sendCommand(
-    agentId: string,
-    sessionId: string,
-    command: ResumeCommand,
-    options?: {
-      context?: Record<string, unknown>;
-      onProgress?: (progress: JobProgress) => void;
-    },
-  ): Promise<StepResult> {
-    const job = await this.addOrchestratorJob(agentId, sessionId, {
-      type: 'command',
-      command,
-      ...(options?.context !== undefined && { context: options.context }),
-    });
-    return this.resolveResult(job, options?.onProgress);
-  }
-
-  async endChat(
-    agentId: string,
-    sessionId: string,
-    context?: Record<string, unknown>,
-  ): Promise<StepResult> {
-    const job = await this.addOrchestratorJob(agentId, sessionId, {
-      type: 'end-chat',
-      context,
-    });
-    return this.resolveResult(job);
-  }
-
-  /** Send a document to the worker for ingestion into the agent's RAG index. The worker must be started with rag to process document jobs. */
-  async addDocument(agentId: string, source: DocumentSource): Promise<void> {
-    const job = await this.documentQueue.add(
-      'add-document',
-      { agentId, source } satisfies DocumentJobData,
-      { jobId: `doc/${agentId}/${Date.now()}` },
-    );
-    await job.waitUntilFinished(this.documentEvents);
-  }
-
-  async setSessionConfig(
-    sessionId: string,
-    config: SessionConfig,
-  ): Promise<void> {
-    const redis = (await this.orchestratorQueue.client) as RedisLike;
-    await setSessionConfigStore(redis, this.queuePrefix, sessionId, config);
-  }
-
-  async getSessionConfig(sessionId: string): Promise<Required<SessionConfig>> {
-    const redis = (await this.orchestratorQueue.client) as RedisLike;
-    return getSessionConfigStore(redis, this.queuePrefix, sessionId);
-  }
-
-  async getConversationHistory(
-    sessionId: string,
-  ): Promise<SerializedMessage[]> {
-    const [orchResults, aggPairs] = await Promise.all([
-      fetchSessionResults(this.orchestratorQueue, sessionId),
-      fetchAggregatorResultsWithChildren(this.aggregatorQueue, sessionId),
-    ]);
-    const aggResults = aggPairs.map(([, r]) => r);
-    return buildConversationHistory(orchResults, aggResults);
-  }
-
+  /**
+   * Close all queue connections.
+   */
   async close(): Promise<void> {
-    await this.orchestratorEvents.close();
-    await this.aggregatorEvents.close();
-    await this.agentEvents.close();
-    await this.documentEvents.close();
-    await this.documentQueue.close();
-    await this.orchestratorQueue.close();
-    await this.aggregatorQueue.close();
+    await Promise.all([
+      this.agentQueueEvents.close(),
+      this.aggregatorQueueEvents.close(),
+      this.agentQueue.close(),
+      this.aggregatorQueue.close(),
+      this.ingestQueue.close(),
+    ]);
   }
 
-  private addOrchestratorJob(
+  /**
+   * Start a new agent run (fire-and-forget). Returns agentId, threadId and jobId.
+   */
+  async run(
     agentId: string,
-    sessionId: string,
-    extra: {
-      type: JobType;
-      prompt?: string;
-      attachments?: PromptAttachment[];
-      command?: ResumeCommand;
-      context?: Record<string, unknown>;
-      goalId?: string;
-      initialMessages?: SerializedMessage[];
-      priority?: number;
-      toolChoice?: string | Record<string, unknown> | 'auto' | 'any' | 'none';
-      sessionConfig?: SessionConfig;
-      onProgress?: (progress: JobProgress) => void;
-    },
-  ): Promise<Job<OrchestratorJobData>> {
-    const { priority, onProgress: _onProgress, ...jobData } = extra;
-    const opts: { jobId: string; removeOnComplete: KeepJobs; removeOnFail: KeepJobs; priority?: number } = {
-      jobId: `${sessionId}/${Date.now()}`,
-      removeOnComplete: this.keepResult,
-      removeOnFail: this.keepResult,
-    };
-    if (priority !== undefined) opts.priority = priority;
-    const data: OrchestratorJobData = {
-      sessionId,
-      agentId,
-      ...jobData,
-    };
-    return this.orchestratorQueue.add('orchestrator-step', data, opts);
+    threadId: string,
+    options: RunOptions
+  ): Promise<RunResult> {
+    const agentQueue = this.agentQueue;
+    const messages = options.messages;
+    const job = await agentQueue.add("run", {
+      agentId: agentId,
+      threadId: threadId,
+      chatModelOptions: options.chatModelOptions,
+      goalId: options.goalId,
+      input: { messages },
+    });
+    return { agentId, threadId, jobId: job.id };
   }
 
-  private async resolveResult(
-    job: Job<OrchestratorJobData>,
-    onProgress?: (progress: JobProgress) => void,
-  ): Promise<StepResult> {
-    const sessionId = job.data.sessionId;
-    const rawResult = await waitForJobWithProgress<StepResult | string>(
-      job,
-      this.orchestratorEvents,
-      onProgress,
-    );
-    const result: StepResult =
-      typeof rawResult === 'string' ? JSON.parse(rawResult) : rawResult;
-
-    if (result.status === 'routing' && result.routingJobId) {
-      return this.waitForAggregator(
-        result.routingJobId,
-        sessionId,
-        onProgress,
-      );
+  /**
+   * Run and wait for the job to complete (or interrupt). Use for sync-style chat.
+   * When the agent interrupts for a tool or subagent, waits for the worker-enqueued resume job(s) automatically;
+   * returns only when the run completes with a final message or a human-in-the-loop interrupt.
+   */
+  async runAndWait(
+    agentId: string,
+    threadId: string,
+    options: RunOptions,
+    ttl: number = defaultWaitTtl
+  ): Promise<AgentJobResult> {
+    const { jobId } = await this.run(agentId, threadId, options);
+    if (!jobId) return { status: "completed" };
+    const job = await this.agentQueue.getJob(jobId);
+    if (!job) return { status: "completed" };
+    let result: AgentJobResult = await job.waitUntilFinished(this.agentQueueEvents, ttl);
+    while (result.status === "interrupted") {
+      const payload = result.interruptPayload;
+      if (payload?.type === "aggregator") {
+        result = await this.waitForAggregatorJobResult(payload.aggregatorJobId, ttl);
+        continue;
+      }
+      break;
     }
-
     return result;
   }
 
-  private async waitForAggregator(
-    aggregatorJobId: string,
-    sessionId: string,
-    onProgress?: (progress: JobProgress) => void,
-  ): Promise<StepResult> {
-    const aggJob = await this.aggregatorQueue.getJob(aggregatorJobId);
-    if (!aggJob) {
-      throw new Error(`Aggregator job ${aggregatorJobId} not found`);
-    }
-
-    const effectiveSessionId =
-      sessionId ?? (aggJob.data as { sessionId?: string }).sessionId;
-
-    const rawResult = await waitForJobWithProgress<StepResult | string>(
-      aggJob,
-      this.aggregatorEvents,
-      onProgress,
-      [
-        ...(effectiveSessionId ? [{
-          events: this.agentEvents,
-          isRelevant: (_jobId: string, data: unknown) =>
-            data != null &&
-            typeof data === 'object' &&
-            'sessionId' in data &&
-            data.sessionId === effectiveSessionId,
-        }] : []),
-      ],
-    );
-    const result: StepResult =
-      typeof rawResult === 'string' ? JSON.parse(rawResult) : rawResult;
-    const children = await aggJob.getChildrenValues<StepResult>();
-    return expandAggregatorResult(result, children ?? {});
+  /**
+ * Resume a run after a human-in-the-loop interrupt (fire-and-forget).
+ */
+  async resume(
+    agentId: string,
+    threadId: string,
+    result: unknown,
+    _options: ResumeOptions = {}
+  ): Promise<{ jobId: string | undefined }> {
+    const job = await this.agentQueue.add("resume", {
+      agentId: agentId,
+      threadId: threadId,
+      result: result,
+      interruptPayload: { type: "human" },
+    });
+    return { jobId: job.id };
   }
+
+  /**
+   * Resume and wait for the job to complete (or next interrupt). When the agent interrupts for a tool or subagent,
+   * waits for the worker-enqueued resume job(s) automatically; returns only on completion or human interrupt.
+   */
+  async resumeAndWait(
+    agentId: string,
+    threadId: string,
+    result: unknown,
+    _options: ResumeOptions = {},
+    ttl: number = defaultWaitTtl
+  ): Promise<AgentJobResult> {
+    const job = await this.agentQueue.add("resume", {
+      agentId,
+      threadId: threadId,
+      result,
+      interruptPayload: { type: "human" }
+    });
+    if (!job.id) return { status: "completed" };
+    const fullJob = await this.agentQueue.getJob(job.id);
+    if (!fullJob) return { status: "completed" };
+    let out: AgentJobResult = await fullJob.waitUntilFinished(this.agentQueueEvents, ttl);
+    while (out.status === "interrupted") {
+      const payload = out.interruptPayload;
+      if (payload?.type === "aggregator") {
+        out = await this.waitForAggregatorJobResult(payload.aggregatorJobId, ttl);
+        continue;
+      }
+      break;
+    }
+    return out;
+  }
+
+  /**
+   * Ingest documents into the RAG vector store for an agent.
+   */
+  async ingest({ agentId, source }: IngestOptions): Promise<{ jobId: string | undefined }> {
+    const job = await this.ingestQueue.add("ingest", {
+      agentId,
+      source,
+    });
+    return { jobId: job.id };
+  }
+
+  /**
+   * Wait for an aggregator job to complete. The aggregator resumes the graph directly and returns the result (no agent resume job).
+   */
+  private async waitForAggregatorJobResult(aggregatorJobId: string, ttl: number): Promise<AgentJobResult> {
+    const job = await this.aggregatorQueue.getJob(aggregatorJobId);
+    if (!job) return { status: "completed" };
+    const returnvalue = await job.waitUntilFinished(this.aggregatorQueueEvents, ttl);
+    const parsed =
+      typeof returnvalue === "string" ? (JSON.parse(returnvalue) as AgentJobResult) : (returnvalue as AgentJobResult);
+    return parsed ?? { status: "completed" };
+  }
+
+  /**
+   * Get an agent-queue job by id.
+   */
+  getAgentJob(jobId: string) {
+    return this.agentQueue.getJob(jobId);
+  }
+
 }

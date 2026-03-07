@@ -2,63 +2,55 @@
 
 Scalable AI agent orchestration powered by [BullMQ](https://docs.bullmq.io/) and [LangChain](https://js.langchain.com/).
 
-Define goals and tools, connect any LLM, and let BullMQ handle the rest — parallel execution, persistent sessions, and Redis-backed reliability. Works with a single agent or multiple specialized agents that run concurrently.
+Define goals and system prompts, connect any LLM, and let BullMQ handle the rest — tool execution, persistent checkpoints, and Redis-backed reliability. Built-in tools include RAG (search knowledge) and human-in-the-loop (request approval).
 
 ## Features
 
-- **Single or Multi-Agent** — one goal runs directly; multiple goals are automatically routed and executed in parallel via BullMQ Flows
-- **Provider Agnostic** — works with any LLM supported by LangChain (`openai`, `anthropic`, `google-genai`, etc.)
-- **Persistent Sessions** — conversations survive restarts; resume any session from where it left off
-- **Human-in-the-loop** — require user approval before executing tool calls; optional live-operator mode via `human_in_the_loop`: operator can tip the agent or send the reply as the agent
-- **Job Progress** — optional progress callbacks (prompt-read, thinking, typing, etc.) via BullMQ `job.updateProgress()`
-- **Redis-Backed** — all state lives in Redis via BullMQ; no additional database needed
-- **Type-Safe Tools** — define tool schemas with [TypeBox](https://github.com/sinclairzx81/typebox) for full type inference
+- **Goals & system prompts** — Configure goals with `id` and `systemPrompt`; the agent uses the selected goal’s system prompt for each run
+- **Provider agnostic** — Works with any LLM supported by LangChain (`openai`, `anthropic`, `google-genai`, etc.) via `chatModelOptions` and `embeddingModelOptions`
+- **Persistent checkpoints** — LangGraph checkpointing in Redis; resume runs after interrupts
+- **Human-in-the-loop** — Built-in `request_human_approval` tool; agent can pause and wait for operator input, then resume with `resume` / `resumeAndWait`
+- **RAG** — Built-in `search_knowledge` tool; ingest documents per agent via `client.ingest()` and optional `VectorStoreProvider`
+- **Redis-backed** — Queues and checkpoints in Redis; vector store uses [@langchain/redis](https://js.langchain.com/docs/integrations/vectorstores/redis) (Redis Stack recommended for RediSearch)
+- **Type-safe** — Full TypeScript; `ModelOptions`, `RunOptions`, `Goal`, and queue types exported
 
 ## How It Works
 
 ```
-┌─────────┐    prompt     ┌──────────────┐
-│  Client  │─────────────▶│ Orchestrator │
-└─────────┘               │   (BullMQ)   │
-     ▲                    └──────┬───────┘
-     │                           │
-     │    result           ┌─────┴─────┐
-     │◀────────────────────┤  Router /  │
-     │                     │  Direct    │
-     │                     └─────┬─────┘
-     │                           │
-     │              ┌────────────┼────────────┐
-     │              ▼            ▼             ▼
-     │         ┌─────────┐ ┌─────────┐  ┌─────────┐
-     │         │ Agent A  │ │ Agent B  │  │ Agent C  │
-     │         │ (tools)  │ │ (tools)  │  │ (tools)  │
-     │         └────┬─────┘ └────┬─────┘  └────┬─────┘
-     │              │            │              │
-     │              └────────────┼──────────────┘
-     │                           ▼
-     │                     ┌───────────┐
-     └─────────────────────┤ Aggregator│
-                           └───────────┘
+┌─────────┐    run(agentId, threadId, { messages, chatModelOptions, goalId? })
+│  Client  │─────────────────────────────────────────────────────────────────▶ Agent Queue
+└─────────┘                                                                           │
+     ▲                                                                                ▼
+     │    runAndWait / resumeAndWait                                            AgentWorker
+     │    (job result: completed | interrupted)                                 (LangGraph)
+     │                                                                                │
+     │                                                                     tools: search_knowledge,
+     │                                                                     request_human_approval
+     │                                                                                │
+     │    ingest({ agentId, source }) ─────────────────────────────────────▶ Ingest Queue
+     │                                                                                │
+     └───────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Single-agent mode:** The orchestrator processes the prompt directly — no routing or aggregation overhead.
+- **Client** enqueues `run` or `resume` jobs with `agentId`, `threadId`, and options. Use `runAndWait` / `resumeAndWait` for sync-style flows.
+- **AgentWorker** runs the LangGraph agent with built-in tools; checkpoints are stored in Redis.
+- **Tools, aggregator, and ingest** run as separate BullMQ workers; the library starts them together via `BullMQAgentWorker`.
 
-**Multi-agent mode:** An LLM-powered router selects which agents should handle the request. Selected agents run in parallel as BullMQ child jobs, and an aggregator collects their results.
+Client and worker must use the same Redis `connection` and, if you set it, the same `prefix`.
 
-### Agents and goals
+### Goals
 
-- **Agent** — An individual identity. Identified by `agentId`. An agent can execute any goal defined on the worker (or the goal specified on the job).
-- **Goal** — An objective (id, name, description, tools, system message). Goals are fixed on the worker; multiple agents can share the same goals. Tools and system prompts come from the goal.
+A **goal** is an `{ id, systemPrompt }` pair. When you pass `goalId` in `RunOptions`, the agent uses that goal’s `systemPrompt` for the run. Goals are optional; you can also rely on `agentSystemPrompt(agentId)` on the worker.
 
-Sessions are tied to an agent: you pass `sessionId` and `agentId` to the client. Optionally pass `rag` on the worker for RAG (document queue + retrieve tool).
+Sessions are identified by `agentId` + `threadId`. You pass **messages** (conversation history) on each `run`; the library does not persist chat history itself — checkpoint state is used for resuming interrupted runs.
 
 ### RAG (Retrieval Augmented Generation)
 
-When the worker is started with `rag` options (including `embedding`), it injects a **retrieve** tool so the model can query each agent's knowledge base. Documents are stored per agent in **RedisVectorStore** (index name: `rag:{queuePrefix}:agent:{agentId}`). **Redis must have RediSearch** (e.g. [Redis Stack](https://redis.io/docs/stack/)); plain Redis is not enough. Example: `docker run -d -p 6379:6379 redis/redis-stack`.
+When you call `client.ingest({ agentId, source })`, documents are queued and processed by the ingest worker. The built-in **search_knowledge** tool queries the vector store for that agent. Documents are stored per agent (index: `{agentId}-rag`).
 
-- **Adding documents:** Use `client.addDocument(agentId, source)` with `source` = `{ type: 'url', url }`, `{ type: 'file', path }`, or `{ type: 'text', text }`. The worker ingests using its `rag.embedding` (and optional `rag.indexName`). Only workers started with `rag` (with `embedding`) process document jobs.
-- **Embeddings:** Configure on the worker via `rag.embedding`. Supported providers: `openai`, `cohere` (install `@langchain/openai` or `@langchain/cohere`).
-- **Example:** `examples/rag-agent.ts` — agent worker with RAG, indexed text, and questions answered via the retrieve tool.
+- **Source format:** `{ type: 'url' | 'file' | 'text', content: string, metadata?: Record<string, unknown> }`. For `url`, `content` is the URL; for `file`, `content` is the file path; for `text`, `content` is the raw text.
+- **Embeddings:** Set `embeddingModelOptions` on the worker (e.g. OpenAI). The library does not read `process.env`; pass `apiKey` from your app or CLI.
+- **Redis:** Vector store uses `@langchain/redis`; for production, use [Redis Stack](https://redis.io/docs/stack/) (e.g. `docker run -d -p 6379:6379 redis/redis-stack`).
 
 ## Installation
 
@@ -66,316 +58,227 @@ When the worker is started with `rag` options (including `embedding`), it inject
 npm install bullmq-ai-agent
 ```
 
-Install a LangChain provider for your LLM of choice:
+Install a LangChain provider for your LLM and embeddings:
 
 ```bash
-# Pick one (or more)
 npm install @langchain/openai
-npm install @langchain/anthropic
-npm install @langchain/google-genai
+# or @langchain/anthropic, @langchain/google-genai, etc.
 ```
 
-You'll also need a running Redis instance. [Redis docs](https://redis.io/docs/getting-started/) or:
+You need a running Redis instance (and Redis Stack if using the vector store):
 
 ```bash
-docker run -d --name redis -p 6379:6379 redis
+docker run -d --name redis -p 6379:6379 redis/redis-stack
 ```
 
 ## Quick Start
 
-### 1. Define Tools
+### 1. Define goals (optional)
 
-Tools use [TypeBox](https://github.com/sinclairzx81/typebox) schemas for type-safe argument validation:
+Goals provide system prompts for the agent. `systemPrompt` is an array of `SystemMessageFields` (e.g. `[{ type: 'text', text: 'You are a helpful assistant.' }]`).
 
 ```typescript
-import { Type } from '@sinclair/typebox';
-import type { AgentTool } from 'bullmq-ai-agent';
+import type { Goal } from "bullmq-ai-agent";
 
-const SearchFlightsSchema = Type.Object({
-  origin: Type.String({ description: 'Origin airport code (e.g. SFO)' }),
-  destination: Type.String({ description: 'Destination airport code (e.g. JFK)' }),
-  date: Type.String({ description: 'Travel date in YYYY-MM-DD format' }),
-});
-
-const searchFlights: AgentTool<typeof SearchFlightsSchema> = {
-  name: 'SearchFlights',
-  description: 'Search for available flights between two airports on a given date',
-  schema: SearchFlightsSchema,
-  handler: async (args) => {
-    // args is fully typed: { origin: string, destination: string, date: string }
-    const flights = await yourFlightAPI.search(args);
-    return { flights };
+const goals: Goal[] = [
+  {
+    id: "default",
+    systemPrompt: [{ type: "text", text: "You are a helpful assistant. Use search_knowledge when needed." }],
   },
-};
+];
 ```
 
-### 2. Define Goals
+### 2. Start the worker
 
-A goal groups related tools under a name and description that the LLM uses to understand its purpose:
-
-```typescript
-import type { AgentGoal } from 'bullmq-ai-agent';
-
-const flightGoal: AgentGoal = {
-  id: 'flight-booking',
-  name: 'Flight Finder',
-  title: 'Search and book flights to any destination',
-  description:
-    'Help the user find and book flights. ' +
-    '1. Use SearchFlights to find available options. ' +
-    '2. Use BookFlight to book the chosen flight.',
-  tools: [searchFlights, bookFlight],
-};
-```
-
-### 3. Start the Worker
-
-To enable RAG (document queue + retrieve tool), pass `rag: { embedding, ... }`.
+`BullMQAgentWorker` starts the agent, tools, and ingest workers. **embeddingModelOptions** is required (used for RAG and ingest).
 
 ```typescript
-import { AgentWorker } from 'bullmq-ai-agent';
+import { BullMQAgentWorker } from "bullmq-ai-agent";
 
-const worker = new AgentWorker({
-  connection: { host: 'localhost', port: 6379 },
-  llmConfig: async () => ({
-    model: 'openai:gpt-4o',
-    apiKey: process.env.OPENAI_API_KEY,
-  }),
-  goals: [flightGoal],
+const worker = new BullMQAgentWorker({
+  connection: { host: "localhost", port: 6379 },
+  goals,
+  embeddingModelOptions: {
+    provider: "openai",
+    model: "text-embedding-3-small",
+    apiKey: process.env.OPENAI_API_KEY!,
+  },
 });
 
 await worker.start();
 ```
 
-### 4. Chat with an agent (AgentClient)
+### 3. Use the client
 
-Use **AgentClient** to send prompts; `agentId` is required on every call.
+Use **BullMQAgentClient** to enqueue runs and ingest documents. Pass **messages** (conversation history) and **chatModelOptions** on each run; the library does not read `process.env` for API keys.
 
 ```typescript
-import { AgentClient } from 'bullmq-ai-agent';
+import { BullMQAgentClient } from "bullmq-ai-agent";
+import { mapChatMessagesToStoredMessages } from "@langchain/core/messages";
 
-const client = new AgentClient({
-  connection: { host: 'localhost', port: 6379 },
+const client = new BullMQAgentClient({
+  connection: { host: "localhost", port: 6379 },
 });
 
-const agentId = 'my-agent';
-const sessionId = 'user-123';
+const agentId = "my-agent";
+const threadId = "user-123";
+const messages = []; // or load from your store
 
-// Optional: set session config (human-in-the-loop, auto-execute tools). Defaults: both false.
-await client.setSessionConfig(sessionId, {
-  humanInTheLoop: true,   // Agent can pause and ask the operator for input
-  autoExecuteTools: false // Require user confirmation before running tools
-});
+// Append user message and run
+const userMessage = { role: "user" as const, content: "What can you do?" };
+const storedMessages = mapChatMessagesToStoredMessages([
+  ...messages.map((m) => ({ role: m.role, content: m.content })),
+  userMessage,
+]);
 
-// Send a prompt (agentId is required)
-let result = await client.sendPrompt(agentId, sessionId, 'Find flights from SFO to JFK on March 15', {
-  onProgress: (p) => console.log(p.phase), // 'prompt-read' | 'thinking' | 'typing' | ...
-});
+const result = await client.runAndWait(
+  agentId,
+  threadId,
+  {
+    chatModelOptions: { provider: "openai", model: "gpt-4o-mini", apiKey: process.env.OPENAI_API_KEY! },
+    goalId: "default",
+    messages: storedMessages,
+  },
+  120_000
+);
 
-// Human-in-the-loop: when status is 'interrupted', use sendCommand() to resume
-if (result.status === 'interrupted' && result.interrupts?.length) {
-  const interrupt = result.interrupts[0];
-
-  if (interrupt.type === 'human_input') {
-    result = await client.sendCommand(agentId, sessionId, {
-      type: 'hitl_response',
-      payload: { message: 'User said: yes, proceed' },
-    });
-    // Or: client.sendCommand(agentId, sessionId, { type: 'hitl_direct_reply', payload: { message: '...' } });
-  } else {
-    const approved = Object.fromEntries(
-      interrupt.actionRequests.map((a) => [a.name, true]),
-    );
-    result = await client.sendCommand(agentId, sessionId, {
-      type: 'tool_approval',
-      payload: { approved },
-    });
-  }
+if (result.status === "interrupted") {
+  // Human-in-the-loop: pass user response and resume
+  const resumed = await client.resumeAndWait(
+    agentId,
+    threadId,
+    result.interruptPayload,
+    {},
+    120_000
+  );
+  console.log(resumed.lastMessage);
+} else {
+  console.log(result.lastMessage);
 }
 
-// When the worker has RAG, add documents for an agent
-await client.addDocument(agentId, { type: 'text', text: '...' });
-
-// Retrieve full conversation history (survives restarts)
-const history = await client.getConversationHistory(sessionId);
-```
-
-## Multi-Agent Mode
-
-Pass multiple goals and the orchestrator automatically routes each prompt to the right agent(s):
-
-```typescript
-const worker = new AgentWorker({
-  connection: { host: 'localhost', port: 6379 },
-  llmConfig: async () => ({
-    model: 'openai:gpt-4o',
-    apiKey: process.env.OPENAI_API_KEY,
-  }),
-  goals: [flightGoal, hrGoal, expenseGoal], // 2+ goals enables multi-agent mode
+// Ingest documents for RAG
+await client.ingest({
+  agentId,
+  source: { type: "text", content: "Your document text here.", metadata: { source: "readme" } },
 });
-```
 
-When a user sends "Book a flight to NYC and check my PTO balance", the orchestrator dispatches both the flight and HR agents in parallel. Results are aggregated and returned together.
+await client.close();
+```
 
 ## API Reference
 
-### `AgentWorker`
+### BullMQAgentClient
 
-The server-side component that processes jobs.
+| Method | Description |
+|--------|-------------|
+| `run(agentId, threadId, options)` | Enqueue a run job. Returns `{ agentId, threadId, jobId }`. |
+| `runAndWait(agentId, threadId, options, ttl?)` | Run and wait for completion or interrupt. When interrupted by a tool/subagent, waits for the worker-enqueued resume automatically; returns when done or when a human-in-the-loop interrupt occurs. Default `ttl` is 2 minutes. |
+| `resume(agentId, threadId, result)` | Enqueue a resume job after a human-in-the-loop interrupt (fire-and-forget). |
+| `resumeAndWait(agentId, threadId, result, options?, ttl?)` | Resume and wait for the next completion or interrupt. Default `ttl` is 2 minutes. |
+| `ingest({ agentId, source })` | Add a document to the agent’s RAG index. `source`: `{ type: 'url'\|'file'\|'text', content: string, metadata? }`. |
+| `getAgentJob(jobId)` | Get an agent-queue job by id. |
+| `close()` | Close queue connections. |
 
-```typescript
-new AgentWorker(options: AgentWorkerOptions)
-```
+**RunOptions**
 
+- `chatModelOptions: ModelOptions` — `{ provider, model, apiKey }`. Required; pass API key from your app.
+- `goalId?: string` — When set, the goal’s `systemPrompt` is used (must match a goal id on the worker).
+- `messages: StoredMessage[]` — Conversation history for this run (e.g. from `mapChatMessagesToStoredMessages`).
 
-| Option              | Type                | Description                                                       |
-| ------------------- | ------------------- | ----------------------------------------------------------------- |
-| `connection`        | `ConnectionOptions` | Redis connection (from BullMQ)                                    |
-| `llmConfig`        | `(options) => Promise<AgentWorkerLlmConfigData>` | Called each step; return config for `initChatModel` (model, apiKey, etc.) |
-| `goals`             | `AgentGoal[]`       | Fixed list of goals; agents can execute any of them               |
-| `rag`               | `AgentWorkerRagOptions?` | When set (with `embedding`), RAG is enabled: document queue + retrieve tool for all agents |
+If `ttl` is exceeded on `runAndWait` or `resumeAndWait`, the wait fails (the job may still be running). Use a larger `ttl` for long runs or poll `getAgentJob(jobId)` for fire-and-forget flows.
 
-`humanInTheLoop` and `autoExecuteTools` are configured **per session** via `client.setSessionConfig(sessionId, config)` (see below).
+### BullMQAgentWorker
 
+| Option | Type | Description |
+|--------|------|-------------|
+| `connection` | `QueueBaseOptions` | Redis connection (BullMQ). Client and worker must use the same connection and `prefix`. |
+| `prefix?` | `string` | Queue/key prefix (e.g. `QUEUE_PREFIX` env). Defaults to no prefix; use the same value as the client. |
+| `documentConnection?` | `ConnectionOptions` | Redis for vector store; defaults to `connection`. |
+| `goals?` | `Goal[]` | Goals with `id` and `systemPrompt`. |
+| `agentSystemPrompt?` | `(agentId: string) => Promise<SystemMessageFields[]>` | Extra system prompt per agent (after goal systemPrompt). |
+| `embeddingModelOptions` | `ModelOptions` | **Required.** Used for RAG and ingest. |
 
-**Methods:**
+**Methods**
 
-- `start(): Promise<void>` — Start processing jobs
-- `close(): Promise<void>` — Gracefully shut down all workers
+- `start(): Promise<void>` — Connect Redis and start all workers (agent, tools, ingest).
+- `close(): Promise<void>` — Gracefully close all workers, the flow producer, and Redis connections.
 
-### `AgentClient`
+### Run result (AgentJobResult)
 
-The client for sending prompts and managing sessions. Always requires `agentId` on send methods.
+- `status: 'completed' | 'interrupted'`  
+- `lastMessage?: string` — Last AI text content when completed.  
+- `interruptPayload?: InterruptPayload` — When `status === 'interrupted'`:
+  - **Human-in-the-loop:** `{ type: 'human', message?: string, options?: Record<string, unknown> }`. Pass the human's response (any value, e.g. `"Approved"` or `{ approved: true }`) as the second argument to `resume()` / `resumeAndWait()`.
+  - **External tools:** `{ type: 'aggregator', aggregatorJobId: string }`. The client automatically waits for this job when using `runAndWait` / `resumeAndWait`; no action needed.
 
-```typescript
-new AgentClient(options: AgentClientOptions)
-```
-
-
-| Option         | Type                | Description                                              |
-| -------------- | ------------------- | -------------------------------------------------------- |
-| `connection`   | `ConnectionOptions` | Redis connection (from BullMQ)                           |
-| `jobRetention` | `JobRetention?`     | How long to keep completed jobs (default: 1h / 200 jobs) |
-| `queuePrefix`  | `string?`           | Must match the worker's queuePrefix                      |
-
-
-**Methods:**
-
-- `setSessionConfig(sessionId, config): Promise<void>` — Set config for a session. `config: { humanInTheLoop?: boolean, autoExecuteTools?: boolean }`. Call before or at the start of a conversation. The worker reads this when processing jobs for the session.
-- `getSessionConfig(sessionId): Promise<Required<SessionConfig>>` — Get current session config (returns defaults when not set).
-- `sendPrompt(sessionId, agentId, prompt, options?): Promise<StepResult>` — Send a new user message. Options: `attachments` (images, video, audio, or documents — see type `PromptAttachment`), `goalId`, `context`, `initialMessages`, `priority`, `toolChoice`, `sessionConfig`, `onProgress(progress)`. Tool behavior uses session config; pass `sessionConfig` to override for this request only (takes priority over Redis).
-- `sendCommand(sessionId, agentId, command, options?): Promise<StepResult>` — Resume after status `interrupted`. The `command` is a discriminated union (`ResumeCommand`):
-  - `{ type: 'tool_approval', payload: { approved: { [toolName]: true | false } } }` — approve/reject tools
-  - `{ type: 'hitl_response', payload: { message: '...' } }` — tip the agent (agent formulates reply)
-  - `{ type: 'hitl_direct_reply', payload: { message: '...' } }` — send as the agent (no model call)
-- `endChat(agentId, sessionId, context?): Promise<StepResult>` — End the conversation
-- `addDocument(agentId, source): Promise<void>` — Add a document to an agent's RAG index (worker must be started with `rag: { embedding, ... }`). `source`: `{ type: 'url', url }`, `{ type: 'file', path }`, or `{ type: 'text', text }`.
-- `getConversationHistory(sessionId): Promise<SerializedMessage[]>` — Get full history
-- `close(): Promise<void>` — Close client connections
-
-### `StepResult`
-
-Returned by `sendPrompt`, `sendCommand`, and `endChat`:
+### ModelOptions
 
 ```typescript
-interface StepResult {
-  history: SerializedMessage[];       // New messages from this step
-  agentId?: string;                   // Agent that produced this result
-  goalId?: string;                    // Active goal
-  status: 'active' | 'interrupted' | 'ended' | 'routing';
-  interrupts?: Interrupt[];           // When status is 'interrupted': pending actions
-  childrenValues?: Record<string, StepResult>; // Per-goal results (multi-agent mode)
-}
-
-interface Interrupt {
-  type: 'tool_approval' | 'human_input'; // What kind of interrupt
-  actionRequests: ActionRequest[];        // Each has id, name, arguments, description
-  goalId?: string;                        // Goal id in multi-goal mode
+interface ModelOptions {
+  provider: string;  // e.g. "openai"
+  model: string;     // e.g. "gpt-4o-mini"
+  apiKey: string;
 }
 ```
 
-### `ResumeCommand`
+Pass from your app or CLI; the library does not read `process.env`. To load API keys from a `.env` file, call `import "dotenv/config"` (or equivalent) in your app or CLI entrypoint before using the library.
 
-Discriminated union passed to `sendCommand` to resume after an interrupt:
-
-```typescript
-// Approve/reject tools
-{ type: 'tool_approval', approved: { SearchFlights: true, BookFlight: false } }
-
-// Reject with feedback
-{ type: 'tool_approval', approved: { BookFlight: { approved: false, feedback: 'Too expensive' } } }
-
-// Tip the agent (agent uses this to formulate reply)
-{ type: 'hitl_response', response: 'The answer is 42' }
-
-// Send as the agent directly (no model call)
-{ type: 'hitl_direct_reply', message: 'Here is your answer.' }
-```
-
-### `JobProgress`
-
-When using `onProgress` with `sendPrompt` or `sendCommand`, the callback receives objects of this shape (from BullMQ job progress):
+### Goal
 
 ```typescript
-interface JobProgress {
-  phase: 'prompt-read' | 'routing' | 'thinking' | 'typing' | 'executing-tool' | 'aggregating';
-  sessionId?: string;
-  goalId?: string;   // present in multi-agent mode
-  toolName?: string; // present when phase is 'executing-tool'
+interface Goal {
+  id: string;
+  systemPrompt: SystemMessageFields[];  // from @langchain/core/messages
 }
 ```
 
-### Utility Functions
-
-- `deriveResponse(messages): string | undefined` — Extract the last AI text response from a message array
-- `deriveToolCalls(messages, goalId): ToolCall[]` — Extract pending tool calls from a message array
-
-## LLM Configuration
-
-`llmConfig` is called at the start of each orchestrator/agent step with `{ goalId?, context? }`. Return an object that LangChain's [`initChatModel`](https://js.langchain.com/docs/how_to/chat_models_universal_init/) accepts. Any provider with a `@langchain/*` package works:
+### Ingest document source
 
 ```typescript
-// Static config (same for every step)
-llmConfig: async () => ({
-  model: 'openai:gpt-4o',
-  apiKey: process.env.OPENAI_API_KEY,
-})
+// URL: content = full URL
+{ type: "url", content: "https://example.com/page", metadata?: {} }
 
-// Per-goal or per-request
-llmConfig: async ({ goalId, context }) => ({
-  model: goalId === 'hr-pto' ? 'anthropic:claude-3-5-sonnet' : 'openai:gpt-4o',
-  apiKey: process.env.OPENAI_API_KEY,
-  temperature: context?.temperature ?? 0.2,
-})
+// File: content = file path
+{ type: "file", content: "/path/to/file.txt", metadata?: {} }
+
+// Inline text
+{ type: "text", content: "Raw text...", metadata?: {} }
 ```
 
-### Explicit goal and session history
+## Built-in tools
 
-When you pass `goalId` to `sendPrompt`, the worker runs that goal in **single-goal mode**: the orchestrator runs the agent directly and stores the step in the orchestrator queue (no routing, no flow). That keeps behavior consistent when you pin a conversation to one goal.
+The agent is configured with these tools (no need to register them yourself):
 
-Session history is always built from **both** the orchestrator and aggregator queues. So if you switch between single-goal (or explicit `goalId`) and multi-goal routing in the same session, you do not lose history: the worker merges prior single-goal steps and prior multi-goal steps for the current goal when building the message list for the LLM.
-
+- **search_knowledge** — RAG search over the agent’s ingested documents (when ingest worker and `embeddingModelOptions` are used).
+- **request_human_approval** — Pauses the run and returns an interrupt; resume with `resume` / `resumeAndWait` and the human’s response.
 ## Examples
 
-The repository includes runnable examples:
+The package ships an interactive CLI (also in the repo at `examples/cli.ts`) that starts workers and runs basic chat, RAG, and human-in-the-loop flows. From an installed package, run:
 
 ```bash
-# Single agent — flight booking
-npx tsx examples/single-agent.ts
-
-# Multi-agent — flight booking + HR assistant
-npx tsx examples/multi-agent.ts
+npx tsx node_modules/bullmq-ai-agent/examples/cli.ts
 ```
 
-Both examples feature a CLI chat interface with conversation history that persists across restarts.
+(If you get a module not found error for `@clack/prompts`, install it: `npm install @clack/prompts`.)
+
+From the repo, run (this builds and installs the package first so the example resolves the library):
+
+```bash
+npm run example
+```
+
+You will be prompted for an OpenAI API key (stored in `.agent.json` for next runs). Use `REDIS_URL` (e.g. `redis://localhost:6379`) for connection and optional `QUEUE_PREFIX` for the queue prefix (the library uses the `prefix` option; default is `bullmq-ai-agent`).
+
+## Exports
+
+- **Client / Worker:** `BullMQAgentClient`, `BullMQAgentWorker`, `BullMQAgentWorkerOptions`
+- **Types:** `RunOptions`, `RunResult`, `ResumeOptions`, `IngestDocument`, `IngestOptions`, `AgentJobResult`, `AggregatorJobData`, `InterruptPayload`, `HumanInterruptPayload`, `AggregatorInterruptPayload`, `MessageRole`, `ModelOptions`, `RunContext`, `Goal`
+- **Queues:** `createAgentQueue`, `createIngestQueue`, `createToolsQueue`, `createAggregatorQueue`, `QUEUE_NAMES` (queue name constants for custom workers or monitoring)
+- **Agent / RAG:** `compileGraph`, `VectorStoreProvider`, `VectorStoreProviderOptions`
 
 ## Contributing
 
-Contributions are welcome! Please open an issue or submit a pull request.
-
-## Support
-
-If you find this project useful, consider [buying me a coffee](https://buymeacoffee.com/humbertogontijo).
+Contributions are welcome. Please open an issue or submit a pull request.
 
 ## License
 

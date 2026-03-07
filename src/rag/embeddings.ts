@@ -6,7 +6,8 @@ import { OpenAIEmbeddings } from '@langchain/openai';
  */
 
 import type { EmbeddingsInterface } from '@langchain/core/embeddings';
-import type { EmbeddingConfig } from '../types.js';
+
+type EmbeddingConfig = { provider: 'openai' | 'cohere'; model?: string; apiKey?: string }
 
 export function getEmbeddings(config: EmbeddingConfig): EmbeddingsInterface {
   switch (config.provider) {
@@ -23,7 +24,7 @@ export function getEmbeddings(config: EmbeddingConfig): EmbeddingsInterface {
       });
     }
     default: {
-      const p = (config as EmbeddingConfig).provider;
+      const p = config.provider;
       throw new Error(`Unknown embedding provider: ${p}`);
     }
   }

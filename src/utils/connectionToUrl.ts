@@ -5,25 +5,34 @@
 
 import type { ConnectionOptions } from 'bullmq';
 
+/** Options we read to build a Redis URL (from ConnectionOptions or connection.options). */
+export interface RedisUrlOptions {
+  url?: string;
+  host?: string;
+  port?: number;
+  password?: string;
+  db?: number;
+}
+
 /** True when connection is an IORedis Redis or Cluster instance (has .options), not a plain config object. */
 function isRedisInstance(
   c: ConnectionOptions,
-): c is ConnectionOptions & { options: Record<string, unknown> } {
+): c is ConnectionOptions & { options: RedisUrlOptions } {
   return (
     c != null &&
     typeof c === 'object' &&
     'options' in c &&
-    (c as { options?: unknown }).options != null &&
-    typeof (c as { options: unknown }).options === 'object'
+    c.options != null &&
+    typeof c.options === 'object'
   );
 }
 
-function buildUrlFromOptions(opts: Record<string, unknown>): string {
+function buildUrlFromOptions(opts: RedisUrlOptions): string {
   if (typeof opts.url === 'string') return opts.url;
-  const host = (opts.host as string) ?? 'localhost';
-  const port = (opts.port as number) ?? 6379;
-  const password = opts.password as string | undefined;
-  const db = opts.db as number | undefined;
+  const host = opts.host ?? 'localhost';
+  const port = opts.port ?? 6379;
+  const password = opts.password;
+  const db = opts.db;
   let url = `redis://${host}:${port}`;
   if (password) url = url.replace('redis://', `redis://:${encodeURIComponent(password)}@`);
   if (db !== undefined && db !== 0) url += `/${db}`;
@@ -31,8 +40,8 @@ function buildUrlFromOptions(opts: Record<string, unknown>): string {
 }
 
 export function connectionToRedisUrl(connection: ConnectionOptions): string {
-  const opts: Record<string, unknown> = isRedisInstance(connection)
-    ? (connection.options as Record<string, unknown>)
-    : (connection as Record<string, unknown>);
+  const opts: RedisUrlOptions = isRedisInstance(connection)
+    ? connection.options
+    : (connection as RedisUrlOptions);
   return buildUrlFromOptions(opts);
 }
