@@ -10,6 +10,12 @@ import type { AgentJobData, AgentJobResult, AggregatorJobData, IngestJobData } f
 
 export type MessageRole = "user" | "assistant" | "system";
 
+/** Progress payload from BullMQ job (worker calls job.updateProgress). */
+export interface JobProgress {
+  stage?: string;
+  [key: string]: unknown;
+}
+
 export interface RunOptions {
   /** Chat model (provider, model, apiKey). Pass apiKey from the caller (e.g. CLI); library does not read process.env. */
   chatModelOptions: ModelOptions;
@@ -17,11 +23,13 @@ export interface RunOptions {
   goalId?: string;
   /** Initial messages (e.g. [{ role: "user", content: "Hello" }]). */
   messages: StoredMessage[];
+  /** Called when the worker reports progress (e.g. graph node stage). Uses BullMQ job progress. */
+  onProgress?: (progress: JobProgress) => void;
 }
 
-/** Reserved for future options. */
 export interface ResumeOptions {
-
+  /** Called when the worker reports progress (e.g. graph node stage). Uses BullMQ job progress. */
+  onProgress?: (progress: JobProgress) => void;
 }
 
 export interface IngestDocument {
@@ -95,6 +103,9 @@ export class BullMQAgentClient {
       goalId: options.goalId,
       input: { messages },
     });
+    if (options.onProgress && job.id) {
+      this.subscribeToJobProgress(job.id, options.onProgress);
+    }
     return { agentId, threadId, jobId: job.id };
   }
 
@@ -132,7 +143,7 @@ export class BullMQAgentClient {
     agentId: string,
     threadId: string,
     result: unknown,
-    _options: ResumeOptions = {}
+    options: ResumeOptions = {}
   ): Promise<{ jobId: string | undefined }> {
     const job = await this.agentQueue.add("resume", {
       agentId: agentId,
@@ -140,6 +151,9 @@ export class BullMQAgentClient {
       result: result,
       interruptPayload: { type: "human" },
     });
+    if (options.onProgress && job.id) {
+      this.subscribeToJobProgress(job.id, options.onProgress);
+    }
     return { jobId: job.id };
   }
 
@@ -151,7 +165,7 @@ export class BullMQAgentClient {
     agentId: string,
     threadId: string,
     result: unknown,
-    _options: ResumeOptions = {},
+    options: ResumeOptions = {},
     ttl: number = defaultWaitTtl
   ): Promise<AgentJobResult> {
     const job = await this.agentQueue.add("resume", {
@@ -160,6 +174,9 @@ export class BullMQAgentClient {
       result,
       interruptPayload: { type: "human" }
     });
+    if (options.onProgress && job.id) {
+      this.subscribeToJobProgress(job.id, options.onProgress);
+    }
     if (!job.id) return { status: "completed" };
     const fullJob = await this.agentQueue.getJob(job.id);
     if (!fullJob) return { status: "completed" };
@@ -203,6 +220,30 @@ export class BullMQAgentClient {
    */
   getAgentJob(jobId: string) {
     return this.agentQueue.getJob(jobId);
+  }
+
+  /**
+   * Subscribe to progress events for a job. Returns unsubscribe. Listener is auto-removed when job completes or fails.
+   */
+  private subscribeToJobProgress(jobId: string, onProgress: (progress: JobProgress) => void): () => void {
+    const progressHandler = (args: { jobId: string; data: unknown }, _id?: string) => {
+      if (args.jobId === jobId) onProgress(args.data as JobProgress);
+    };
+    const remove = () => {
+      this.agentQueueEvents.off("progress", progressHandler);
+      this.agentQueueEvents.off("completed", completedHandler);
+      this.agentQueueEvents.off("failed", failedHandler);
+    };
+    const completedHandler = ({ jobId: id }: { jobId: string }) => {
+      if (id === jobId) remove();
+    };
+    const failedHandler = ({ jobId: id }: { jobId: string }) => {
+      if (id === jobId) remove();
+    };
+    this.agentQueueEvents.on("progress", progressHandler);
+    this.agentQueueEvents.on("completed", completedHandler);
+    this.agentQueueEvents.on("failed", failedHandler);
+    return remove;
   }
 
 }

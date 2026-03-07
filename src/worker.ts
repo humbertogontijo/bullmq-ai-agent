@@ -112,12 +112,14 @@ export class BullMQAgentWorker {
     const toolsQueue = createToolsQueue(queueOptions);
     this.flowProducer = new FlowProducer(queueOptions);
 
-    const tools = [createSearchKnowledgeTool(this.vectorStoreProvider), requestHumanInTheLoop];
+    const baseTools = [createSearchKnowledgeTool(this.vectorStoreProvider), requestHumanInTheLoop];
     const goals = this.goals;
+    const goalTools = goals?.flatMap((g) => g.tools ?? []) ?? [];
+    const tools = [...baseTools, ...goalTools];
     const agentSystemPrompt = this.agentSystemPrompt;
 
     const compiledGraph = await compileGraph({
-      tools,
+      tools: baseTools,
       toolsQueue,
       flowProducer: this.flowProducer,
       checkpointer: this.checkpointer,
@@ -146,7 +148,7 @@ export class BullMQAgentWorker {
     this.aggregatorWorker.start();
 
     this.toolsWorker = new ToolsWorker(
-      { tools, embeddingModelOptions: this.embeddingModelOptions, logger: this.logger },
+      { tools, goals, embeddingModelOptions: this.embeddingModelOptions, logger: this.logger },
       queueOptions
     );
     this.toolsWorker.start();

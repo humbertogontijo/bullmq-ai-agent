@@ -11,6 +11,7 @@ export { BullMQAgentClient } from "./client.js";
 export type {
   IngestDocument,
   IngestOptions,
+  JobProgress,
   MessageRole,
   ResumeOptions,
   RunOptions,

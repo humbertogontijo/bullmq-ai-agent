@@ -18,10 +18,12 @@ import { nextSnowflakeId } from "../utils/snowflake.js";
 import type { AgentStateType } from "./state.js";
 import { AgentState } from "./state.js";
 
-/** Goal: id plus system prompt messages used when this goal is selected for a run. */
+/** Goal: id plus system prompt and optional custom tools used when this goal is selected for a run. */
 export interface Goal {
   id: string;
   systemPrompt: SystemMessageFields[];
+  /** Optional tools to add for this goal (merged with orchestrator context tools). */
+  tools?: StructuredToolInterface[];
 }
 
 /** Context bound when building the graph (worker-held queues and vector stores by agentId). */
@@ -71,9 +73,11 @@ function createModelNode(ctx: OrchestratorContext) {
     if (!chatModelOptions) throw new Error("chatModelOptions required (pass in run or reuse from checkpoint on resume)");
     const agentId = configurable.agentId;
     const goalId = state.goalId ?? configurable.goalId;
-    const goalSystemPrompt = goalId ? goals?.find((g) => g.id === goalId)?.systemPrompt : undefined;
+    const goal = goalId ? goals?.find((g) => g.id === goalId) : undefined;
+    const goalSystemPrompt = goal?.systemPrompt;
+    const effectiveTools = [...tools, ...(goal?.tools ?? [])];
     const agentPrompt = agentSystemPrompt ? await agentSystemPrompt(agentId) : undefined;
-    const llm = await createLlm(chatModelOptions, tools);
+    const llm = await createLlm(chatModelOptions, effectiveTools);
     const goalMessages: BaseMessage[] = goalSystemPrompt?.length
       ? goalSystemPrompt.map((s) => new SystemMessage(s))
       : [];
@@ -87,7 +91,7 @@ function createModelNode(ctx: OrchestratorContext) {
 }
 
 function createExecuteToolNode(ctx: OrchestratorContext) {
-  const { tools, flowProducer } = ctx;
+  const { tools, goals, flowProducer } = ctx;
   return async function executeToolNode(
     state: AgentStateType,
     runnableConfig: LangGraphRunnableConfig
@@ -96,6 +100,9 @@ function createExecuteToolNode(ctx: OrchestratorContext) {
     const configurable = runnableConfig.configurable as RunContext;
     const checkpointThreadId = configurable.thread_id;
     const agentId = configurable.agentId;
+    const goalId = state.goalId ?? configurable.goalId;
+    const goal = goalId ? goals?.find((g) => g.id === goalId) : undefined;
+    const effectiveTools = [...tools, ...(goal?.tools ?? [])];
     const chatModelOptions = configurable.chatModelOptions ?? state.chatModelOptions;
     const clientThreadId = checkpointThreadId.includes(":") ? checkpointThreadId.split(":")[1]! : checkpointThreadId;
 
@@ -126,8 +133,6 @@ function createExecuteToolNode(ctx: OrchestratorContext) {
           args,
           toolCallId,
           threadId: clientThreadId,
-          chatModelOptions: chatModelOptions!,
-          goalId: configurable.goalId,
         },
         opts: { jobId: nextSnowflakeId() },
       });
@@ -164,7 +169,7 @@ function createExecuteToolNode(ctx: OrchestratorContext) {
       pendingInternalTools.map(
         async (tc) => {
           const toolCallId = tc.id ?? `tc-${Date.now()}-${tc.name}`;
-          const t = tools.find((t) => t.name === tc.name);
+          const t = effectiveTools.find((t) => t.name === tc.name);
           const result = t ? await t.invoke(tc.args, runnableConfig) : undefined;
           return new ToolMessage({
             content: typeof result === "string" ? result : JSON.stringify(result ?? {}),

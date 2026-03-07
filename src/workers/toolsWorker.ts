@@ -1,19 +1,22 @@
 import type { StoredMessage } from "@langchain/core/messages";
 import { StructuredToolInterface } from "@langchain/core/tools";
 import { Worker, WorkerOptions } from "bullmq";
+import type { Goal } from "../agent/orchestrator.js";
 import type { AgentWorkerLogger, ModelOptions } from "../options.js";
 import { QUEUE_NAMES, RunContext } from "../options.js";
 import type { ToolJobData } from "../queues/types.js";
 
-
 export interface ToolsWorkerParams {
   tools: StructuredToolInterface[];
+  /** When set, goal tools are merged only for the job's goalId (when job has goalId). */
+  goals?: Goal[];
   embeddingModelOptions: ModelOptions;
   logger: AgentWorkerLogger;
 }
 
 export class ToolsWorker {
   private readonly tools: StructuredToolInterface[];
+  private readonly goals: Goal[] | undefined;
   private readonly embeddingModelOptions: ModelOptions;
   private readonly logger: AgentWorkerLogger;
   private readonly options: WorkerOptions;
@@ -22,6 +25,7 @@ export class ToolsWorker {
 
   constructor(params: ToolsWorkerParams, options: WorkerOptions) {
     this.tools = params.tools;
+    this.goals = params.goals;
     this.embeddingModelOptions = params.embeddingModelOptions;
     this.logger = params.logger;
     this.options = options;
@@ -32,11 +36,11 @@ export class ToolsWorker {
     this.worker = new Worker<ToolJobData>(
       QUEUE_NAMES.TOOLS,
       async (job) => {
-        const { agentId, toolName, args, toolCallId, threadId, chatModelOptions, goalId } = job.data;
+        const { agentId, toolName, args, toolCallId, threadId } = job.data;
         const tool = this.tools.find((t) => t.name === toolName);
         let result: unknown;
         if (tool) {
-          const runConfig: { configurable: RunContext } = { configurable: { thread_id: threadId, agentId, job, chatModelOptions, embeddingModelOptions: this.embeddingModelOptions, goalId } };
+          const runConfig: { configurable: RunContext } = { configurable: { thread_id: threadId, agentId, job, embeddingModelOptions: this.embeddingModelOptions } };
           result = await tool.invoke(args, runConfig);
         } else {
           result = { error: `Unknown tool: ${toolName}` };

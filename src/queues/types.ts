@@ -53,9 +53,6 @@ export interface ToolJobData {
   args: Record<string, unknown>;
   toolCallId: string;
   threadId: string;
-  chatModelOptions: ModelOptions;
-  goalId?: string;
-  parentJobId?: string;
 }
 
 /** Tools queue job return value: a StoredMessage of type "tool" (content + tool_call_id). */
