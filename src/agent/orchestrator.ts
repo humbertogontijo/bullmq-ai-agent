@@ -1,13 +1,13 @@
 import type { SystemMessageFields } from "@langchain/core/messages";
 import type { StructuredToolInterface } from "@langchain/core/tools";
-import { CompiledSubAgent, type CreateDeepAgentParams } from "deepagents";
+import { CompiledSubAgent } from "deepagents";
 import { initChatModel, SystemMessage } from "langchain";
 import type { AgentConfig, ModelOptions, Skill } from "../options.js";
 import type { RedisSaver } from "../redis/RedisSaver.js";
 import { createDeepAgent } from "./createDeepAgent.js";
 import { createProgressMiddleware } from "./progress.js";
 
-type TRunnable = CompiledSubAgent["runnable"]
+type TRunnable = Awaited<ReturnType<typeof createRunnable>>
 
 /** Subagent: name, description, system prompt, and optional tools/model. When subagentId is set, that subagent runs directly. */
 export interface Subagent {
@@ -42,17 +42,12 @@ function runnableCacheKey(subagentId: string | undefined, opts: ModelOptions): s
   return `${subagentId ?? "main"}:${opts.provider}:${opts.model}:${opts.apiKey?.slice(0, 8) ?? ""}`;
 }
 
-/** Build deep agent without filesystem tools; returns Runnable to avoid TS2589 (excessively deep type instantiation). */
-function createDeepAgentRunnable(params?: CreateDeepAgentParams): TRunnable {
-  return createDeepAgent(params as never) as unknown as TRunnable;
-}
-
 /** Build a runnable (main agent or subagent) for the given subagentId and model options. */
 async function createRunnable(
   ctx: CompileGraphOptions,
   subagentId: string | undefined,
   chatModelOptions: ModelOptions
-): Promise<TRunnable> {
+) {
   const { tools, subagents, checkpointer, systemPrompt } = ctx;
   const compiledSubagents = await Promise.all(subagents?.map(async (subagent) => {
     const subagentModel = subagent.model ?? chatModelOptions;
@@ -61,7 +56,7 @@ async function createRunnable(
       temperature: subagentModel.temperature,
       maxTokens: subagentModel.maxTokens,
     });
-    const runnable = createDeepAgentRunnable({
+    const runnable = createDeepAgent({
       model: chaModel,
       tools: subagent.tools,
       systemPrompt: new SystemMessage(subagent.systemPrompt),
@@ -71,7 +66,7 @@ async function createRunnable(
       name: subagent.name,
       description: subagent.description,
       runnable,
-    } as CompiledSubAgent;
+    } satisfies CompiledSubAgent;
   }) ?? []);
 
   if (subagentId) {
@@ -83,7 +78,7 @@ async function createRunnable(
   const { provider, model, ...options } = chatModelOptions;
   const chatModel = await initChatModel(`${chatModelOptions.provider}:${chatModelOptions.model}`, options);
 
-  return createDeepAgentRunnable({
+  return createDeepAgent({
     model: chatModel,
     tools,
     systemPrompt: systemPrompt ? new SystemMessage(systemPrompt) : "",
@@ -102,7 +97,7 @@ export interface OrchestratorRunnables {
 export function buildOrchestratorRunnables(
   ctx: CompileGraphOptions
 ): OrchestratorRunnables {
-  const cache = new Map<string, TRunnable>();
+  const cache = new Map<string, Awaited<ReturnType<typeof createRunnable>>>();
 
   return {
     async getRunnable(subagentId: string | undefined, chatModelOptions: ModelOptions): Promise<TRunnable> {

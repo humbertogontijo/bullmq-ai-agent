@@ -71,10 +71,17 @@ export class AgentWorker {
       const chatModelOptions = effectiveChatModelOptions;
       const subagentId = runData.subagentId;
       const runnable = await this.compiledGraph.getRunnable(subagentId, chatModelOptions);
-      const state = await runnable.invoke(
+      const stream = await runnable.stream(
         { messages },
         { configurable: { ...configurable, subagentId, chatModelOptions } }
       );
+      let state: Awaited<ReturnType<typeof runnable.invoke>> | undefined;
+      for await (const chunk of stream) {
+        state = chunk;
+      }
+      if (state == null) {
+        return { status: "completed" };
+      }
       const [interrupt] = state["__interrupt__"] ?? [];
       if (interrupt) {
         const interruptPayload = interrupt.value;

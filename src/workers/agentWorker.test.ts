@@ -16,10 +16,18 @@ const testModelOptions = {
   embeddingModelOptions: { provider: "openai", model: "text-embedding-3-small", apiKey: "test-key" },
 };
 
-function createMockCompiledGraph(invokeResult: { messages?: unknown[]; __interrupt__?: { value: unknown }[] }) {
-  const invoke = vi.fn().mockResolvedValue(invokeResult);
+function createAsyncIterable<T>(values: T[]): AsyncIterable<T> {
   return {
-    getRunnable: vi.fn().mockResolvedValue({ invoke }),
+    async *[Symbol.asyncIterator]() {
+      for (const v of values) yield v;
+    },
+  };
+}
+
+function createMockCompiledGraph(streamResult: { messages?: unknown[]; __interrupt__?: { value: unknown }[] }) {
+  const stream = vi.fn().mockResolvedValue(createAsyncIterable([streamResult]));
+  return {
+    getRunnable: vi.fn().mockResolvedValue({ stream }),
     getAgentConfig: undefined,
     getSkillsPrompt: undefined,
   };
@@ -106,7 +114,7 @@ describe("AgentWorker.processJob", () => {
     });
 
     it("rethrows non-GraphInterrupt errors", async () => {
-      const runnable = { invoke: vi.fn().mockRejectedValue(new Error("Graph failed")) };
+      const runnable = { stream: vi.fn().mockRejectedValue(new Error("Graph failed")) };
       const compiledGraph = { getRunnable: vi.fn().mockResolvedValue(runnable), getAgentConfig: undefined, getSkillsPrompt: undefined };
       const worker = await createWorker(compiledGraph);
       await expect(worker.processJob(runJob)).rejects.toThrow("Graph failed");

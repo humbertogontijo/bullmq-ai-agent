@@ -40,7 +40,14 @@ export class ResumeWorker {
     }
     const runnable = await this.compiledGraph.getRunnable(subagentId, chatModelOptions);
     const resumePayload = { content: result.content };
-    const state = await runnable.invoke(new Command({ resume: resumePayload }), { configurable });
+    const stream = await runnable.stream(new Command({ resume: resumePayload }), { configurable });
+    let state: Awaited<ReturnType<typeof runnable.invoke>> | undefined;
+    for await (const chunk of stream) {
+      state = chunk;
+    }
+    if (state == null) {
+      return { status: "completed" };
+    }
     const [interrupt] = state?.["__interrupt__"] ?? [];
     if (interrupt) {
       return { status: "interrupted", interruptPayload: interrupt.value };
