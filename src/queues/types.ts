@@ -60,3 +60,24 @@ export interface IngestJobData {
   agentId: string;
   source: DocumentSource;
 }
+
+/** Result of an ingest job (worker return value). */
+export interface IngestJobResult {
+  ingested: number;
+}
+
+/**
+ * Search queue: similarity search over the RAG vector store for an agent.
+ */
+export interface SearchJobData {
+  agentId: string;
+  query: string;
+  /** Number of results to return (default 5). */
+  k?: number;
+}
+
+/** Result of a search job (worker return value). */
+export interface SearchJobResult {
+  results: Array<{ content: string; metadata: Record<string, unknown> }>;
+  count: number;
+}

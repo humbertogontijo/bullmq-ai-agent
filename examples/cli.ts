@@ -119,7 +119,12 @@ async function runTurn(
   const agentId = "default";
   const threadId = SESSION_ID;
   const messages = toStoredMessages([...history]);
-  let result = await client.runAndWait(agentId, threadId, { messages }, WAIT_TTL);
+  const runResult = await client.run(agentId, threadId, { messages });
+  let result = await runResult.wait(WAIT_TTL);
+
+  if (result.status === "no_job" || result.status === "job_not_found") {
+    return { lastMessage: undefined, done: true };
+  }
 
   while (result.status === "interrupted") {
     const payload = result.interruptPayload;
@@ -131,8 +136,11 @@ async function runTurn(
           placeholder: "Your response...",
         })
       );
-      const resumeResult = { content: humanInput }
-      result = await client.resumeAndWait(agentId, threadId, resumeResult, {}, WAIT_TTL);
+      const resumeResult = await client.resume(agentId, threadId, { content: humanInput });
+      result = await resumeResult.wait(WAIT_TTL);
+      if (result.status === "no_job" || result.status === "job_not_found") {
+        return { lastMessage: undefined, done: true };
+      }
       if (result.status === "interrupted") {
         continue;
       }
@@ -182,7 +190,7 @@ async function flowRag(client: BullMQAgentClient, workers: BullMQAgentWorker, mo
 
   if (ingestNow) {
     clack.log.message("Ingesting...");
-    await client.ingest({
+    const ingestResult = await client.ingest({
       agentId: "default",
       source: {
         type: 'text',
@@ -190,8 +198,12 @@ async function flowRag(client: BullMQAgentClient, workers: BullMQAgentWorker, mo
         metadata: { source: "readme" }
       },
     });
-    clack.log.message("Waiting for ingest to process (3s)...");
-    await new Promise((r) => setTimeout(r, 3000));
+    const ingestOut = await ingestResult.wait(WAIT_TTL);
+    if (ingestOut.status === "no_job" || ingestOut.status === "job_not_found") {
+      clack.log.warn("Ingest job could not be found.");
+    } else {
+      clack.log.message(`Ingested ${ingestOut.ingested} document(s).`);
+    }
   }
 
   const history: Array<{ role: MessageRole; content: string }> = [];

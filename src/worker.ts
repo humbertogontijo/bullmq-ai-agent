@@ -20,6 +20,7 @@ import { RedisSaver } from "./redis/RedisSaver.js";
 import { AgentWorker } from "./workers/agentWorker.js";
 import { IngestWorker } from "./workers/ingestWorker.js";
 import { ResumeWorker } from "./workers/resumeWorker.js";
+import { SearchWorker } from "./workers/searchWorker.js";
 import { BaseCheckpointSaver } from "@langchain/langgraph-checkpoint";
 
 /** Wrapper around createDeepAgent that returns Runnable to avoid TS2589 (excessively deep type instantiation). */
@@ -93,6 +94,7 @@ export class BullMQAgentWorker {
 
   private agentWorker: AgentWorker | null = null;
   private ingestWorker: IngestWorker | null = null;
+  private searchWorker: SearchWorker | null = null;
   private redisConnection: RedisConnection | null = null;
   private documentRedisConnection: RedisConnection | null = null;
 
@@ -186,13 +188,19 @@ export class BullMQAgentWorker {
       queueOptions
     );
     this.ingestWorker.start();
+
+    this.searchWorker = new SearchWorker(
+      { vectorStoreProvider: this.vectorStoreProvider, embeddingModelOptions: this.embeddingModelOptions, logger: this.logger },
+      queueOptions
+    );
+    this.searchWorker.start();
   }
 
   /**
    * Gracefully close all workers and Redis connections.
    */
   async close(): Promise<void> {
-    await Promise.all([this.agentWorker?.close(), this.ingestWorker?.close()]);
+    await Promise.all([this.agentWorker?.close(), this.ingestWorker?.close(), this.searchWorker?.close()]);
     if (this.documentRedisConnection) {
       const client = await this.documentRedisConnection.client;
       await client.quit();
@@ -205,5 +213,6 @@ export class BullMQAgentWorker {
     }
     this.agentWorker = null;
     this.ingestWorker = null;
+    this.searchWorker = null;
   }
 }

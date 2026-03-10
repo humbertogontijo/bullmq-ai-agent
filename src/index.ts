@@ -8,14 +8,22 @@
  */
 
 export { BullMQAgentClient } from "./client.js";
+export { ClientResult } from "./client.js";
 export type {
+  AwaitableResultFallback,
+  ClientResultMeta,
+  ClientResultResolved,
   IngestDocument,
   IngestOptions,
+  IngestResult,
   JobProgress,
   MessageRole,
   ResumeOptions,
+  ResumeResult,
   RunOptions,
-  RunResult
+  RunResult,
+  SearchKnowledgeOptions,
+  SearchResult,
 } from "./client.js";
 
 export { BullMQAgentWorker } from "./worker.js";
@@ -29,9 +37,16 @@ export type { AgentConfig, Skill } from "./options.js";
 export type { Subagent } from "./agent/orchestrator.js";
 export { createAgentQueue } from "./queues/agentQueue.js";
 export { createIngestQueue } from "./queues/ingestQueue.js";
-export type { AgentJobResult, EscalationPayload, HumanInterruptPayload, InterruptPayload, ResumeData } from "./queues/types.js";
+export { createSearchQueue } from "./queues/searchQueue.js";
+export type { AgentJobResult, EscalationPayload, HumanInterruptPayload, IngestJobResult, InterruptPayload, ResumeData, SearchJobResult } from "./queues/types.js";
 export type { ProgressStage, ProgressPayload } from "./agent/progress.js";
 export { createProgressMiddleware } from "./agent/progress.js";
 export { VectorStoreProvider, type VectorStoreProviderOptions } from "./rag/index.js";
 export { RedisVectorStore, type RedisVectorStoreConfig, type RedisAddOptions } from "./redis/RedisVectorStore.js";
+
+// LangChain re-exports for convenience
+export type { RunnableConfig } from "@langchain/core/runnables";
+export { tool } from "@langchain/core/tools";
+export { HumanMessage, SystemMessage } from "@langchain/core/messages";
+export type { StoredMessage } from "@langchain/core/messages";
 

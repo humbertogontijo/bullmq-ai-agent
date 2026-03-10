@@ -16,10 +16,11 @@ export function createDefaultAgentWorkerLogger(): AgentWorkerLogger {
   };
 }
 
-/** Default queue name values (agent, tools, ingest). */
+/** Default queue name values (agent, ingest, search). */
 export const QUEUE_NAMES = {
   AGENT: "agent",
   INGEST: "ingest",
+  SEARCH: "search",
 } as const;
 
 /** Chat or embedding model configuration (provider, model id, api key). Pass apiKey from the caller (e.g. CLI); library does not read process.env. */
