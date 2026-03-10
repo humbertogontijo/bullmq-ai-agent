@@ -1,7 +1,8 @@
 import type { SystemMessageFields } from "@langchain/core/messages";
 import type { StructuredToolInterface } from "@langchain/core/tools";
 import { CompiledSubAgent, createDeepAgent, type CreateDeepAgentParams } from "deepagents";
-import { initChatModel, SystemMessage } from "langchain";
+import { SystemMessage } from "langchain";
+import { initChatModel } from "../chatModel.js";
 import type { AgentConfig, ModelOptions, Skill } from "../options.js";
 import { createProgressMiddleware } from "./progress.js";
 import type { RedisSaver } from "../redis/RedisSaver.js";

@@ -3,7 +3,7 @@
  * @see https://docs.langchain.com/oss/javascript/integrations/document_loaders
  */
 
-import { TextLoader } from '@langchain/classic/document_loaders/fs/text';
+import { TextLoader } from './textLoader.js';
 import { CheerioWebBaseLoader } from '@langchain/community/document_loaders/web/cheerio';
 import { Document } from '@langchain/core/documents';
 import { DocumentSource } from '../queues/types.js';
