@@ -72,15 +72,13 @@ describe("BullMQAgentClient", () => {
   });
 
   describe("run", () => {
-    it("returns agentId, threadId and jobId (fire-and-forget)", async () => {
+    it("returns jobId (fire-and-forget)", async () => {
       mockAdd.mockResolvedValue({ id: "job-1" });
 
       const message = { type: "human", data: { content: "Hi", role: "user", name: undefined, tool_call_id: undefined } };
       const threadId = "thread-1";
       const result = await client.run("default", threadId, { messages: [message] });
 
-      expect(result.agentId).toBe("default");
-      expect(result.threadId).toBe(threadId);
       expect(result.jobId).toBe("job-1");
       expect(mockAdd).toHaveBeenCalledWith(
         "run",
@@ -92,14 +90,14 @@ describe("BullMQAgentClient", () => {
       );
     });
 
-    it("uses provided agentId when given", async () => {
+    it("uses provided agentId when given (request payload)", async () => {
       mockAdd.mockResolvedValue({ id: "job-2" });
       const result = await client.run(
         "my-agent",
         "thread-1",
         { messages: [{ type: "human", data: { content: "Hi", role: "user", name: undefined, tool_call_id: undefined } }] }
       );
-      expect(result.agentId).toBe("my-agent");
+      expect(result.jobId).toBe("job-2");
       expect(mockAdd).toHaveBeenCalledWith(
         "run",
         expect.objectContaining({ agentId: "my-agent" })

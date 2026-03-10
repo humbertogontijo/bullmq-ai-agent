@@ -49,11 +49,9 @@ export interface IngestOptions {
 
 const defaultWaitTtl = 120_000; // 2 minutes
 
-/** Meta attached to a client result (jobId; agentId/threadId for run). */
+/** Meta attached to a client result (jobId). */
 export interface ClientResultMeta {
   jobId: string | undefined;
-  agentId?: string;
-  threadId?: string;
 }
 
 /**
@@ -75,14 +73,12 @@ export interface ClientResultQueueLike {
 
 /**
  * Result for run/resume/ingest. Holds queue and queueEvents and handles waiting internally.
- * Use .jobId (and .agentId/.threadId for run) without awaiting. Call .wait(ttl?) to get a Promise
- * for the job result. When jobId is missing or the job is not found, the promise resolves to
+ * Use .jobId without awaiting. Call .wait(ttl?) to get a Promise for the job result.
+ * When jobId is missing or the job is not found, the promise resolves to
  * AwaitableResultFallback (status "no_job" or "job_not_found") so you can handle it explicitly.
  */
 export class ClientResult<T> {
   readonly jobId: string | undefined;
-  readonly agentId?: string;
-  readonly threadId?: string;
   private readonly _queue: ClientResultQueueLike;
   private readonly _queueEvents: QueueEvents;
   private readonly _defaultTtl: number;
@@ -98,8 +94,6 @@ export class ClientResult<T> {
     this._queueEvents = queueEvents;
     this._defaultTtl = defaultTtl;
     this.jobId = safeMeta.jobId;
-    this.agentId = safeMeta.agentId;
-    this.threadId = safeMeta.threadId;
   }
 
   private async _wait(ttl: number): Promise<ClientResultResolved<T>> {
@@ -119,7 +113,7 @@ export class ClientResult<T> {
   }
 }
 
-/** Result of run(); await for AgentJobResult or fallback; use .jobId / .agentId / .threadId. */
+/** Result of run(); use .jobId and .wait(ttl?) for AgentJobResult or fallback. */
 export type RunResult = ClientResult<AgentJobResult>;
 
 /** Result of resume(); await for AgentJobResult or fallback; use .jobId. */
@@ -198,7 +192,7 @@ export class BullMQAgentClient {
     return new ClientResult<AgentJobResult>(
       this.agentQueue,
       this.agentQueueEvents,
-      { jobId: job.id, agentId, threadId },
+      { jobId: job.id },
       defaultWaitTtl
     );
   }
