@@ -1,12 +1,10 @@
 import type { StoredMessage } from "@langchain/core/messages";
 import type { Queue, QueueOptions } from "bullmq";
 import { QueueEvents } from "bullmq";
-import type { ModelOptions } from "./options.js";
 import { QUEUE_NAMES } from "./options.js";
 import { createAgentQueue } from "./queues/agentQueue.js";
-import { createAggregatorQueue } from "./queues/aggregatorQueue.js";
 import { createIngestQueue } from "./queues/ingestQueue.js";
-import type { AgentJobData, AgentJobResult, AggregatorJobData, IngestJobData } from "./queues/types.js";
+import type { AgentJobData, AgentJobResult, IngestJobData, InterruptPayload, ResumeData } from "./queues/types.js";
 
 export type MessageRole = "user" | "assistant" | "system";
 
@@ -17,19 +15,23 @@ export interface JobProgress {
 }
 
 export interface RunOptions {
-  /** Chat model (provider, model, apiKey). Pass apiKey from the caller (e.g. CLI); library does not read process.env. */
-  chatModelOptions: ModelOptions;
-  /** Goal id; when set, the goal's system prompt is used for the model (must match a goal id from BullMQAgentWorker options). */
-  goalId?: string;
+  /** Subagent name; when set, that subagent runs directly (must match a subagent name from BullMQAgentWorker options). */
+  subagentId?: string;
   /** Initial messages (e.g. [{ role: "user", content: "Hello" }]). */
   messages: StoredMessage[];
   /** Called when the worker reports progress (e.g. graph node stage). Uses BullMQ job progress. */
   onProgress?: (progress: JobProgress) => void;
+  /** Optional run-level metadata (e.g. owner, tenant). Passed to configurable so tools and getAgentConfig can read it. */
+  metadata?: Record<string, unknown>;
 }
 
 export interface ResumeOptions {
-  /** Called when the worker reports progress (e.g. graph node stage). Uses BullMQ job progress. */
+  /** Pass when resuming so the same runnable (main or subagent) is used. From interruptPayload. */
+  subagentId?: string;
+  /** Called when the worker reports progress. */
   onProgress?: (progress: JobProgress) => void;
+  /** Optional run-level metadata. Passed to configurable so tools and getAgentConfig can read it. */
+  metadata?: Record<string, unknown>;
 }
 
 export interface IngestDocument {
@@ -54,23 +56,19 @@ const defaultWaitTtl = 120_000; // 2 minutes
 
 /**
  * Client for invoking the BullMQ agent: start runs, resume after human-in-the-loop, and ingest documents for RAG.
- * Call start() to open queue connections; call close() when done so connections are not opened/closed per call.
+ * Tools run in-process; call close() when done.
  */
 export class BullMQAgentClient {
   private readonly options: QueueOptions;
   private readonly agentQueue: Queue<AgentJobData>;
-  private readonly aggregatorQueue: Queue<AggregatorJobData>;
   private readonly ingestQueue: Queue<IngestJobData>;
   private readonly agentQueueEvents: QueueEvents;
-  private readonly aggregatorQueueEvents: QueueEvents;
 
   constructor(options: QueueOptions) {
     this.options = options;
     this.agentQueue = createAgentQueue({ ...this.options });
-    this.aggregatorQueue = createAggregatorQueue({ ...this.options });
     this.ingestQueue = createIngestQueue({ ...this.options });
     this.agentQueueEvents = new QueueEvents(QUEUE_NAMES.AGENT, { ...this.options });
-    this.aggregatorQueueEvents = new QueueEvents(QUEUE_NAMES.AGGREGATOR, { ...this.options });
   }
 
   /**
@@ -79,9 +77,7 @@ export class BullMQAgentClient {
   async close(): Promise<void> {
     await Promise.all([
       this.agentQueueEvents.close(),
-      this.aggregatorQueueEvents.close(),
       this.agentQueue.close(),
-      this.aggregatorQueue.close(),
       this.ingestQueue.close(),
     ]);
   }
@@ -99,8 +95,8 @@ export class BullMQAgentClient {
     const job = await agentQueue.add("run", {
       agentId: agentId,
       threadId: threadId,
-      chatModelOptions: options.chatModelOptions,
-      goalId: options.goalId,
+      subagentId: options.subagentId,
+      metadata: options.metadata,
       input: { messages },
     });
     if (options.onProgress && job.id) {
@@ -110,9 +106,7 @@ export class BullMQAgentClient {
   }
 
   /**
-   * Run and wait for the job to complete (or interrupt). Use for sync-style chat.
-   * When the agent interrupts for a tool or subagent, waits for the worker-enqueued resume job(s) automatically;
-   * returns only when the run completes with a final message or a human-in-the-loop interrupt.
+   * Run and wait for the job to complete (or human-in-the-loop interrupt).
    */
   async runAndWait(
     agentId: string,
@@ -124,32 +118,25 @@ export class BullMQAgentClient {
     if (!jobId) return { status: "completed" };
     const job = await this.agentQueue.getJob(jobId);
     if (!job) return { status: "completed" };
-    let result: AgentJobResult = await job.waitUntilFinished(this.agentQueueEvents, ttl);
-    while (result.status === "interrupted") {
-      const payload = result.interruptPayload;
-      if (payload?.type === "aggregator") {
-        result = await this.waitForAggregatorJobResult(payload.aggregatorJobId, ttl);
-        continue;
-      }
-      break;
-    }
-    return result;
+    return job.waitUntilFinished(this.agentQueueEvents, ttl);
   }
 
   /**
- * Resume a run after a human-in-the-loop interrupt (fire-and-forget).
- */
+   * Resume a run after a human-in-the-loop interrupt (fire-and-forget).
+   * Pass interruptPayload from the previous run so the worker uses the same runnable (subagentId + chatModelOptions).
+   */
   async resume(
     agentId: string,
     threadId: string,
-    result: unknown,
+    result: ResumeData,
     options: ResumeOptions = {}
   ): Promise<{ jobId: string | undefined }> {
     const job = await this.agentQueue.add("resume", {
-      agentId: agentId,
-      threadId: threadId,
-      result: result,
-      interruptPayload: { type: "human" },
+      agentId,
+      threadId,
+      result,
+      subagentId: options.subagentId,
+      metadata: options.metadata,
     });
     if (options.onProgress && job.id) {
       this.subscribeToJobProgress(job.id, options.onProgress);
@@ -158,21 +145,21 @@ export class BullMQAgentClient {
   }
 
   /**
-   * Resume and wait for the job to complete (or next interrupt). When the agent interrupts for a tool or subagent,
-   * waits for the worker-enqueued resume job(s) automatically; returns only on completion or human interrupt.
+   * Resume and wait for the job to complete (or next interrupt).
    */
   async resumeAndWait(
     agentId: string,
     threadId: string,
-    result: unknown,
+    result: ResumeData,
     options: ResumeOptions = {},
     ttl: number = defaultWaitTtl
   ): Promise<AgentJobResult> {
     const job = await this.agentQueue.add("resume", {
       agentId,
-      threadId: threadId,
+      threadId,
       result,
-      interruptPayload: { type: "human" }
+      subagentId: options.subagentId,
+      metadata: options.metadata,
     });
     if (options.onProgress && job.id) {
       this.subscribeToJobProgress(job.id, options.onProgress);
@@ -180,16 +167,7 @@ export class BullMQAgentClient {
     if (!job.id) return { status: "completed" };
     const fullJob = await this.agentQueue.getJob(job.id);
     if (!fullJob) return { status: "completed" };
-    let out: AgentJobResult = await fullJob.waitUntilFinished(this.agentQueueEvents, ttl);
-    while (out.status === "interrupted") {
-      const payload = out.interruptPayload;
-      if (payload?.type === "aggregator") {
-        out = await this.waitForAggregatorJobResult(payload.aggregatorJobId, ttl);
-        continue;
-      }
-      break;
-    }
-    return out;
+    return fullJob.waitUntilFinished(this.agentQueueEvents, ttl);
   }
 
   /**
@@ -201,18 +179,6 @@ export class BullMQAgentClient {
       source,
     });
     return { jobId: job.id };
-  }
-
-  /**
-   * Wait for an aggregator job to complete. The aggregator resumes the graph directly and returns the result (no agent resume job).
-   */
-  private async waitForAggregatorJobResult(aggregatorJobId: string, ttl: number): Promise<AgentJobResult> {
-    const job = await this.aggregatorQueue.getJob(aggregatorJobId);
-    if (!job) return { status: "completed" };
-    const returnvalue = await job.waitUntilFinished(this.aggregatorQueueEvents, ttl);
-    const parsed =
-      typeof returnvalue === "string" ? (JSON.parse(returnvalue) as AgentJobResult) : (returnvalue as AgentJobResult);
-    return parsed ?? { status: "completed" };
   }
 
   /**
@@ -245,5 +211,4 @@ export class BullMQAgentClient {
     this.agentQueueEvents.on("failed", failedHandler);
     return remove;
   }
-
 }

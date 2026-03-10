@@ -1,3 +1,4 @@
+import type { SystemMessageFields } from "@langchain/core/messages";
 import { Job } from "bullmq";
 
 export interface AgentWorkerLogger {
@@ -15,12 +16,10 @@ export function createDefaultAgentWorkerLogger(): AgentWorkerLogger {
   };
 }
 
-/** Default queue name values (agent, tools, ingest, aggregator). */
+/** Default queue name values (agent, tools, ingest). */
 export const QUEUE_NAMES = {
   AGENT: "agent",
-  TOOLS: "tools",
   INGEST: "ingest",
-  AGGREGATOR: "aggregator",
 } as const;
 
 /** Chat or embedding model configuration (provider, model id, api key). Pass apiKey from the caller (e.g. CLI); library does not read process.env. */
@@ -28,14 +27,39 @@ export interface ModelOptions {
   provider: string;
   model: string;
   apiKey: string;
+  /** Optional; used when creating chat model (e.g. initChatModel). */
+  temperature?: number;
+  /** Optional; used when creating chat model. */
+  maxTokens?: number;
 }
 
-/** Per-run data passed in graph configurable (threadId/agentId; optional goal and model options). */
+/** Per-agent configuration (persona, default model). Loaded by getAgentConfig(agentId) and merged with run's chatModelOptions. */
+export interface AgentConfig {
+  /** Persona + instructions; prepended to messages at invoke time. */
+  systemPrompt?: SystemMessageFields | SystemMessageFields[];
+  /** Default model for this agent; run's chatModelOptions override. */
+  model?: ModelOptions;
+  /** Default temperature; run can override if passed. */
+  temperature?: number;
+  /** Default max tokens; run can override. */
+  maxTokens?: number;
+}
+
+/** Skill for progressive disclosure: description in system prompt, content loaded on-demand via load_skill tool. */
+export interface Skill {
+  name: string;
+  description: string;
+  content: string | (() => Promise<string>);
+}
+
+/** Per-run data passed in graph configurable (threadId/agentId; optional subagent, model options, metadata from run/resume). */
 export interface RunContext extends Record<string, any> {
   job: Job;
   agentId: string;
   thread_id: string;
-  goalId?: string;
+  subagentId?: string;
   chatModelOptions?: ModelOptions;
   embeddingModelOptions?: ModelOptions;
+  /** Optional metadata from run/resume job data. CRM can pass owner, tenant, etc.; tools and getAgentConfig can read it. */
+  metadata?: Record<string, unknown>;
 }

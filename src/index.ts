@@ -25,12 +25,13 @@ export type { AgentWorkerLogger, ModelOptions, RunContext } from "./options.js";
 export { createDefaultAgentWorkerLogger, QUEUE_NAMES } from "./options.js";
 
 export { compileGraph } from "./agent/compile.js";
-export type { Goal } from "./agent/orchestrator.js";
+export type { AgentConfig, Skill } from "./options.js";
+export type { Subagent } from "./agent/orchestrator.js";
 export { createAgentQueue } from "./queues/agentQueue.js";
-export { createAggregatorQueue } from "./queues/aggregatorQueue.js";
 export { createIngestQueue } from "./queues/ingestQueue.js";
-export { createToolsQueue } from "./queues/toolsQueue.js";
-export type { AgentJobResult, AggregatorJobData, InterruptPayload, HumanInterruptPayload, AggregatorInterruptPayload } from "./queues/types.js";
+export type { AgentJobResult, EscalationPayload, HumanInterruptPayload, InterruptPayload, ResumeData } from "./queues/types.js";
+export type { ProgressStage, ProgressPayload } from "./agent/progress.js";
+export { createProgressMiddleware } from "./agent/progress.js";
 export { VectorStoreProvider, type VectorStoreProviderOptions } from "./rag/index.js";
 export { RedisVectorStore, type RedisVectorStoreConfig, type RedisAddOptions } from "./redis/RedisVectorStore.js";
 

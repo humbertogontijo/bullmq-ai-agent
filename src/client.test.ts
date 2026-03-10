@@ -20,14 +20,6 @@ vi.mock("./queues/agentQueue.js", () => ({
   }),
 }));
 
-const mockAggregatorGetJob = vi.fn();
-vi.mock("./queues/aggregatorQueue.js", () => ({
-  createAggregatorQueue: () => ({
-    getJob: mockAggregatorGetJob,
-    close: vi.fn().mockResolvedValue(undefined),
-  }),
-}));
-
 const mockIngestAdd = vi.fn();
 vi.mock("./queues/ingestQueue.js", () => ({
   createIngestQueue: () => ({
@@ -41,7 +33,6 @@ vi.mock("./options.js", () => ({
     AGENT: "agent",
     TOOLS: "tools",
     INGEST: "ingest",
-    AGGREGATOR: "aggregator",
   },
 }));
 
@@ -68,7 +59,7 @@ describe("BullMQAgentClient", () => {
 
       const message = { type: "human", data: { content: "Hi", role: "user", name: undefined, tool_call_id: undefined } };
       const threadId = "thread-1";
-      const result = await client.run("default", threadId, { chatModelOptions: testModelOptions.chatModelOptions, messages: [message] });
+      const result = await client.run("default", threadId, { messages: [message] });
 
       expect(result.agentId).toBe("default");
       expect(result.threadId).toBe(threadId);
@@ -78,7 +69,6 @@ describe("BullMQAgentClient", () => {
         expect.objectContaining({
           agentId: "default",
           threadId,
-          chatModelOptions: testModelOptions.chatModelOptions,
           input: { messages: [message] },
         })
       );
@@ -89,7 +79,7 @@ describe("BullMQAgentClient", () => {
       const result = await client.run(
         "my-agent",
         "thread-1",
-        { chatModelOptions: testModelOptions.chatModelOptions, messages: [{ type: "human", data: { content: "Hi", role: "user", name: undefined, tool_call_id: undefined } }] }
+        { messages: [{ type: "human", data: { content: "Hi", role: "user", name: undefined, tool_call_id: undefined } }] }
       );
       expect(result.agentId).toBe("my-agent");
       expect(mockAdd).toHaveBeenCalledWith(
@@ -116,7 +106,7 @@ describe("BullMQAgentClient", () => {
       const result = await client.runAndWait(
         "default",
         threadId,
-        { chatModelOptions: testModelOptions.chatModelOptions, messages: [{ type: "human", data: { content: "Hi", role: "user", name: undefined, tool_call_id: undefined } }] },
+        { messages: [{ type: "human", data: { content: "Hi", role: "user", name: undefined, tool_call_id: undefined } }] },
         5_000
       );
 
@@ -175,12 +165,13 @@ describe("BullMQAgentClient", () => {
     it("returns jobId (fire-and-forget)", async () => {
       mockAdd.mockResolvedValue({ id: "resume-1" });
 
-      const result = await client.resume("default", "t1", "Approved");
+      const resumeData = { content: "Approved" };
+      const result = await client.resume("default", "t1", resumeData);
 
       expect(result.jobId).toBe("resume-1");
       expect(mockAdd).toHaveBeenCalledWith(
         "resume",
-        expect.objectContaining({ agentId: "default", threadId: "t1", result: "Approved" })
+        expect.objectContaining({ agentId: "default", threadId: "t1", result: resumeData })
       );
     });
   });
@@ -196,7 +187,8 @@ describe("BullMQAgentClient", () => {
         }),
       });
 
-      const result = await client.resumeAndWait("default", "t1", "Approved", 5_000);
+      const resumeData = { content: "Approved" };
+      const result = await client.resumeAndWait("default", "t1", resumeData, {}, 5_000);
 
       expect(result.status).toBe("completed");
       expect(result.lastMessage).toBe("Done.");
@@ -212,7 +204,8 @@ describe("BullMQAgentClient", () => {
         }),
       });
 
-      const result = await client.resumeAndWait("default", "t1", "Approved", 5_000);
+      const resumeData = { content: "Approved" };
+      const result = await client.resumeAndWait("default", "t1", resumeData, {}, 5_000);
 
       expect(result.status).toBe("interrupted");
       expect(result.interruptPayload).toEqual({ type: "human", message: "Approve?" });

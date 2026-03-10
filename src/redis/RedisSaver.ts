@@ -1,6 +1,9 @@
 /**
  * Redis checkpoint saver using IORedis with optional key prefix.
- * Compatible with @langchain/langgraph-checkpoint BaseCheckpointSaver and Redis Stack (JSON + RediSearch).
+ * main doc has channel_versions only; channel values live in blob keys
+ * (checkpoint_blob:{thread}:{ns}:{channel}:{version}). put() writes blobs only for newVersions (delta).
+ * get() reconstructs full state from blobs. Efficient and correct for resume.
+ * Requires Redis Stack (JSON + RediSearch modules).
  */
 import type { RunnableConfig } from "@langchain/core/runnables";
 import type {
@@ -58,6 +61,12 @@ function deterministicStringify(obj: unknown): string {
     return value;
   });
 }
+
+/** Z-set key prefix for pending write keys. */
+const WRITE_KEYS_ZSET_PREFIX = "write_keys_zset";
+
+/** Blob key prefix for channel values (one blob per (thread, ns, channel, version)). */
+const CHECKPOINT_BLOB_PREFIX = "checkpoint_blob";
 
 const SCHEMAS = [
   {
@@ -234,22 +243,39 @@ export class RedisSaver extends BaseCheckpointSaver {
     const key = this.k(
       `checkpoint:${threadId}:${checkpointNs}:${checkpointId}`
     );
+    // store checkpoint without channel_values; store channel blobs by (thread, ns, channel, version).
+    // Only write blobs for newVersions (efficient). On load we reconstruct full state from channel_versions + blobs.
     const storedCheckpoint = copyCheckpoint(checkpoint);
-    if (storedCheckpoint.channel_values && newVersions !== undefined) {
-      if (Object.keys(newVersions).length === 0) {
-        storedCheckpoint.channel_values = {};
-      } else {
-        const filteredChannelValues: Record<string, unknown> = {};
-        for (const channel of Object.keys(newVersions)) {
-          if (channel in storedCheckpoint.channel_values) {
-            filteredChannelValues[channel] =
-              storedCheckpoint.channel_values[channel];
-          }
-        }
-        storedCheckpoint.channel_values = filteredChannelValues;
-      }
+    const channelValues = storedCheckpoint.channel_values ?? {};
+    const stored = storedCheckpoint as unknown as Record<string, unknown>;
+    delete stored.channel_values;
+
+    for (const channel of Object.keys(newVersions)) {
+      const version = String(
+        (storedCheckpoint.channel_versions ?? {})[channel] ?? newVersions[channel]
+      );
+      const value = channel in channelValues ? channelValues[channel] : null;
+      const [type, serialized] = await this.serde.dumpsTyped(value ?? undefined);
+      const blobKey = this.k(
+        `${CHECKPOINT_BLOB_PREFIX}:${threadId}:${checkpointNs === "" ? "__empty__" : checkpointNs}:${channel}:${version}`
+      );
+      const blobDoc: Record<string, unknown> = {
+        t: type,
+        b: Buffer.from(serialized).toString("base64"),
+      };
+      await this.jsonSet(blobKey, blobDoc);
+      if (this.ttlConfig?.defaultTTL) await this.applyTTL(blobKey);
     }
 
+    const zsetKey = this.k(
+      `${WRITE_KEYS_ZSET_PREFIX}:${threadId}:${checkpointNs}:${checkpointId}`
+    );
+    const writesExist = (await this.client.exists(zsetKey)) > 0;
+
+    // Store checkpoint and metadata as objects.
+    // Native JSON.stringify in jsonSet() calls toJSON() on LangChain messages.
+    // Native JSON.stringify in jsonSet() will call toJSON() on LangChain messages, preserving
+    // the lc/id form so serde.loadsTyped on read revives them correctly.
     const jsonDoc = {
       thread_id: threadId,
       checkpoint_ns: checkpointNs === "" ? "__empty__" : checkpointNs,
@@ -258,7 +284,7 @@ export class RedisSaver extends BaseCheckpointSaver {
       checkpoint: storedCheckpoint,
       metadata,
       checkpoint_ts: Date.now(),
-      has_writes: "false",
+      has_writes: writesExist ? "true" : "false",
     };
     this.addSearchableMetadataFields(
       jsonDoc as Record<string, unknown>,
@@ -355,13 +381,13 @@ export class RedisSaver extends BaseCheckpointSaver {
             for (const [filterKey, filterValue] of Object.entries(
               options.filter
             )) {
+              const metadataValue = (jsonDoc.metadata as Record<string, unknown>)?.[filterKey];
               if (filterValue === null) {
-                if ((jsonDoc.metadata as Record<string, unknown>)?.[filterKey] !== null) {
+                if (metadataValue !== null) {
                   matches = false;
                   break;
                 }
               } else if (filterValue !== undefined) {
-                const metadataValue = (jsonDoc.metadata as Record<string, unknown>)?.[filterKey];
                 if (
                   typeof filterValue === "object" &&
                   filterValue !== null
@@ -475,15 +501,13 @@ export class RedisSaver extends BaseCheckpointSaver {
             for (const [filterKey, filterValue] of Object.entries(
               options.filter
             )) {
+              const metadataValue = (jsonDoc.metadata as Record<string, unknown>)?.[filterKey];
               if (filterValue === null) {
-                if (
-                  (jsonDoc.metadata as Record<string, unknown>)?.[filterKey] !== null
-                ) {
+                if (metadataValue !== null) {
                   matches = false;
                   break;
                 }
               } else if (filterValue !== undefined) {
-                const metadataValue = (jsonDoc.metadata as Record<string, unknown>)?.[filterKey];
                 if (
                   typeof filterValue === "object" &&
                   filterValue !== null
@@ -559,7 +583,7 @@ export class RedisSaver extends BaseCheckpointSaver {
     }
     if (writeKeys.length > 0) {
       const zsetKey = this.k(
-        `write_keys_zset:${threadId}:${checkpointNs}:${checkpointId}`
+        `${WRITE_KEYS_ZSET_PREFIX}:${threadId}:${checkpointNs}:${checkpointId}`
       );
       const zaddArgs: (string | number)[] = [];
       writeKeys.forEach((key, idx) => {
@@ -586,9 +610,15 @@ export class RedisSaver extends BaseCheckpointSaver {
     const checkpointPattern = this.k(`checkpoint:${threadId}:*`);
     const checkpointKeys = await this.client.keys(checkpointPattern);
     if (checkpointKeys.length > 0) await this.client.del(...checkpointKeys);
-    const writesPattern = this.k(`writes:${threadId}:*`);
-    const writesKeys = await this.client.keys(writesPattern);
-    if (writesKeys.length > 0) await this.client.del(...writesKeys);
+    const blobPattern = this.k(`${CHECKPOINT_BLOB_PREFIX}:${threadId}:*`);
+    const blobKeys = await this.client.keys(blobPattern);
+    if (blobKeys.length > 0) await this.client.del(...blobKeys);
+    const writeKeysPattern = this.k(`checkpoint_write:${threadId}:*`);
+    const writeKeys = await this.client.keys(writeKeysPattern);
+    if (writeKeys.length > 0) await this.client.del(...writeKeys);
+    const zsetPattern = this.k(`${WRITE_KEYS_ZSET_PREFIX}:${threadId}:*`);
+    const zsetKeys = await this.client.keys(zsetPattern);
+    if (zsetKeys.length > 0) await this.client.del(...zsetKeys);
   }
 
   async end(): Promise<void> {
@@ -652,10 +682,32 @@ export class RedisSaver extends BaseCheckpointSaver {
     checkpoint: Checkpoint;
     pendingWrites?: [string, string, unknown][];
   }> {
+    const rawCheckpoint = jsonDoc.checkpoint as Record<string, unknown>;
     const checkpoint = await this.serde.loadsTyped(
       "json",
-      JSON.stringify(jsonDoc.checkpoint)
+      JSON.stringify(rawCheckpoint)
     );
+    // Reconstruct channel_values from blobs (one per channel_versions entry).
+    if (checkpoint.channel_versions) {
+      const threadId = jsonDoc.thread_id as string;
+      const ns =
+        jsonDoc.checkpoint_ns === "__empty__" ? "" : (jsonDoc.checkpoint_ns as string);
+      const nsKey = ns === "" ? "__empty__" : ns;
+      checkpoint.channel_values = {};
+      for (const [channel, version] of Object.entries(checkpoint.channel_versions)) {
+        const blobKey = this.k(
+          `${CHECKPOINT_BLOB_PREFIX}:${threadId}:${nsKey}:${channel}:${version}`
+        );
+        const blobDoc = await this.jsonGet(blobKey);
+        if (blobDoc && typeof blobDoc.t === "string" && typeof blobDoc.b === "string") {
+          const bytes = new Uint8Array(Buffer.from(blobDoc.b as string, "base64"));
+          const value = await this.serde.loadsTyped(blobDoc.t as string, bytes);
+          if (value !== undefined && value !== null) {
+            (checkpoint.channel_values as Record<string, unknown>)[channel] = value;
+          }
+        }
+      }
+    }
     if (
       checkpoint.v < 4 &&
       jsonDoc.parent_checkpoint_id != null

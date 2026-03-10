@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import type { MessageRole } from "bullmq-ai-agent";
 import { BullMQAgentClient, BullMQAgentWorker } from "bullmq-ai-agent";
 import type { ModelOptions } from "bullmq-ai-agent";
+import { ResumeData } from "../src/queues/types";
 
 function toStoredMessages(history: Array<{ role: MessageRole; content: string }>): StoredMessage[] {
   return history.map((m) => ({
@@ -78,11 +79,11 @@ const defaultOptions = {
 };
 
 /**
- * Start all workers (agent, tools, subagents, ingest). Pass embeddingModelOptions (e.g. from getModelOptions(apiKey)).
+ * Start all workers (agent, tools, subagents, ingest). Pass chatModelOptions and embeddingModelOptions (e.g. from getModelOptions(apiKey)).
  * Use env for connection and queue names.
  */
-export async function startWorkers(embeddingModelOptions: ModelOptions): Promise<BullMQAgentWorker> {
-  const workers = new BullMQAgentWorker({ ...defaultOptions, embeddingModelOptions });
+export async function startWorkers(modelOptions: { chatModelOptions: ModelOptions; embeddingModelOptions: ModelOptions }): Promise<BullMQAgentWorker> {
+  const workers = new BullMQAgentWorker({ ...defaultOptions, ...modelOptions });
   await workers.start();
   return workers;
 }
@@ -109,7 +110,7 @@ function orExit<T>(value: T | symbol): T {
 
 async function runTurn(
   client: BullMQAgentClient,
-  modelOptions: { chatModelOptions: ModelOptions; embeddingModelOptions: ModelOptions },
+  _modelOptions: { chatModelOptions: ModelOptions; embeddingModelOptions: ModelOptions },
   history: Array<{ role: MessageRole; content: string }>,
   userInput: string
 ): Promise<{ lastMessage: string | undefined; done: boolean }> {
@@ -118,8 +119,7 @@ async function runTurn(
   const agentId = "default";
   const threadId = SESSION_ID;
   const messages = toStoredMessages([...history]);
-  const options = { ...modelOptions, messages };
-  let result = await client.runAndWait(agentId, threadId, options, WAIT_TTL);
+  let result = await client.runAndWait(agentId, threadId, { messages }, WAIT_TTL);
 
   while (result.status === "interrupted") {
     const payload = result.interruptPayload;
@@ -131,7 +131,8 @@ async function runTurn(
           placeholder: "Your response...",
         })
       );
-      result = await client.resumeAndWait(agentId, threadId, humanInput, {}, WAIT_TTL);
+      const resumeResult = { content: humanInput }
+      result = await client.resumeAndWait(agentId, threadId, resumeResult, {}, WAIT_TTL);
       if (result.status === "interrupted") {
         continue;
       }
@@ -240,7 +241,7 @@ async function main(): Promise<void> {
   const apiKey = await ensureOpenAIKey();
   const modelOptions = getModelOptions(apiKey);
 
-  const workers = await startWorkers(modelOptions.embeddingModelOptions);
+  const workers = await startWorkers(modelOptions);
   const client = createClient();
 
   try {

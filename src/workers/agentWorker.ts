@@ -1,15 +1,17 @@
-import { mapStoredMessagesToChatMessages } from "@langchain/core/messages";
+import { mapStoredMessagesToChatMessages, SystemMessage } from "@langchain/core/messages";
 import { Job, Worker, WorkerOptions } from "bullmq";
-import { CompiledGraph } from "../agent/compile.js";
+import type { CompiledGraph } from "../agent/compile.js";
 import type { AgentWorkerLogger, ModelOptions } from "../options.js";
 import { QUEUE_NAMES, RunContext } from "../options.js";
-import type { AgentJobData, AgentJobResult, AgentResumeData, AgentRunData } from "../queues/types.js";
+import type { AgentJobData, AgentJobResult, AgentResumeData, AgentRunData, HumanInterruptPayload } from "../queues/types.js";
 import { getLastAIMessage } from "../utils/message.js";
 import type { ResumeWorker } from "./resumeWorker.js";
 
 export interface AgentWorkerParams {
   compiledGraph: CompiledGraph;
   resumeWorker: ResumeWorker;
+  /** Default chat model; merged with getAgentConfig(agentId) per run (agent config overrides). */
+  chatModelOptions: ModelOptions;
   embeddingModelOptions: ModelOptions;
   logger: AgentWorkerLogger;
 }
@@ -17,6 +19,7 @@ export interface AgentWorkerParams {
 export class AgentWorker {
   private readonly compiledGraph: CompiledGraph;
   private readonly resumeWorker: ResumeWorker;
+  private readonly chatModelOptions: ModelOptions;
   private readonly embeddingModelOptions: ModelOptions;
   private readonly logger: AgentWorkerLogger;
   private readonly options: WorkerOptions;
@@ -26,36 +29,75 @@ export class AgentWorker {
   constructor(params: AgentWorkerParams, options: WorkerOptions) {
     this.compiledGraph = params.compiledGraph;
     this.resumeWorker = params.resumeWorker;
+    this.chatModelOptions = params.chatModelOptions;
     this.embeddingModelOptions = params.embeddingModelOptions;
     this.logger = params.logger;
     this.options = options;
   }
 
-  /** Process a single agent job (run or resume). Uses shared graph from resumeWorker. */
+  /** Process a single agent job (run or resume). Uses getRunnable(subagentId, chatModelOptions) for main or subagent. */
   async processJob(job: Job<AgentJobData, AgentJobResult>): Promise<AgentJobResult> {
     const data = job.data;
     const threadId = data.threadId;
     const agentId = data.agentId;
-    const configurable: RunContext = { thread_id: threadId, agentId, job, embeddingModelOptions: this.embeddingModelOptions };
+    const configurable: RunContext = { thread_id: threadId, agentId, job, embeddingModelOptions: this.embeddingModelOptions, metadata: data.metadata };
 
     if (job.name === "run") {
       const runData = job.data as AgentRunData;
-      const messages = mapStoredMessagesToChatMessages(runData.input?.messages ?? []);
-      const state = await this.compiledGraph.invoke(
+      let messages = mapStoredMessagesToChatMessages(runData.input?.messages ?? []);
+      const systemParts: InstanceType<typeof SystemMessage>[] = [];
+      if (this.compiledGraph.getSkillsPrompt) {
+        systemParts.push(new SystemMessage(this.compiledGraph.getSkillsPrompt()));
+      }
+      let effectiveChatModelOptions: ModelOptions = { ...this.chatModelOptions };
+      if (this.compiledGraph.getAgentConfig) {
+        const config = await this.compiledGraph.getAgentConfig(agentId);
+        if (config?.systemPrompt) {
+          const fields = Array.isArray(config.systemPrompt) ? config.systemPrompt : [config.systemPrompt];
+          systemParts.push(...fields.map((s) => new SystemMessage(s)));
+        }
+        if (config?.model || config?.temperature != null || config?.maxTokens != null) {
+          effectiveChatModelOptions = {
+            ...this.chatModelOptions,
+            ...config.model,
+            temperature: config.temperature ?? config.model?.temperature ?? this.chatModelOptions.temperature,
+            maxTokens: config.maxTokens ?? config.model?.maxTokens ?? this.chatModelOptions.maxTokens,
+          } as ModelOptions;
+        }
+      }
+      if (systemParts.length) {
+        messages = [...systemParts, ...messages];
+      }
+      const chatModelOptions = effectiveChatModelOptions;
+      const subagentId = runData.subagentId;
+      const runnable = await this.compiledGraph.getRunnable(subagentId, chatModelOptions);
+      const state = await runnable.invoke(
         { messages },
-        { configurable: { ...configurable, goalId: runData.goalId, chatModelOptions: runData.chatModelOptions } }
+        { configurable: { ...configurable, subagentId, chatModelOptions } }
       );
       const [interrupt] = state["__interrupt__"] ?? [];
       if (interrupt) {
-        return { status: "interrupted", interruptPayload: interrupt.value };
+        const interruptPayload = interrupt.value;
+        return {
+          status: "interrupted",
+          interruptPayload,
+        };
       }
-      const lastAIMessageContent = getLastAIMessage(state.messages ?? [])?.content
+      const lastAIMessageContent = getLastAIMessage(state.messages ?? [])?.content;
       return { status: "completed", lastMessage: lastAIMessageContent ? JSON.stringify(lastAIMessageContent) : undefined };
     }
 
     if (job.name === "resume") {
       const resumeData = job.data as AgentResumeData;
-      return this.resumeWorker.runResume(configurable, resumeData.result);
+      let chatModelOptions: ModelOptions = { ...this.chatModelOptions };
+      if (this.compiledGraph.getAgentConfig) {
+        const config = await this.compiledGraph.getAgentConfig(agentId);
+        if (config?.model) {
+          chatModelOptions = { ...this.chatModelOptions, ...config.model } as ModelOptions;
+        }
+      }
+      const subagentId = resumeData.subagentId;
+      return this.resumeWorker.runResume(configurable, resumeData.result, subagentId, chatModelOptions);
     }
 
     return { status: "completed" };

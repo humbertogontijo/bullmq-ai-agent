@@ -2,36 +2,71 @@
  * Single entry point to start and stop all BullMQ agent workers.
  * Pass connection + optional queue prefix via options; CLI/examples can fill from env.
  */
-import type { SystemMessageFields } from "@langchain/core/messages";
-import {
-  FlowProducer,
-  RedisConnection,
-  isRedisInstance,
-  type ConnectionOptions,
-  type QueueOptions,
-} from "bullmq";
+import { SystemMessage, type SystemMessageFields } from "@langchain/core/messages";
+import type { Runnable } from "@langchain/core/runnables";
+import { isRedisInstance, RedisConnection, type ConnectionOptions, type QueueOptions } from "bullmq";
+import { CompiledSubAgent, createDeepAgent, type CreateDeepAgentParams } from "deepagents";
 import type { Cluster, Redis } from "ioredis";
+import { initChatModel, ReactAgent } from "langchain";
 import { compileGraph } from "./agent/compile.js";
-import type { Goal } from "./agent/orchestrator.js";
+import type { Subagent } from "./agent/orchestrator.js";
+import { escalateToHuman } from "./agent/tools/escalateToHuman.js";
 import { requestHumanInTheLoop } from "./agent/tools/humanInTheLoop.js";
+import { createLoadSkillTool } from "./agent/tools/loadSkill.js";
 import { createSearchKnowledgeTool } from "./agent/tools/searchKnowledge.js";
-import { createDefaultAgentWorkerLogger, type AgentWorkerLogger, type ModelOptions } from "./options.js";
-import { createToolsQueue } from "./queues/toolsQueue.js";
+import { AgentConfig, createDefaultAgentWorkerLogger, type AgentWorkerLogger, type ModelOptions, type Skill } from "./options.js";
 import { VectorStoreProvider } from "./rag/index.js";
 import { RedisSaver } from "./redis/RedisSaver.js";
 import { AgentWorker } from "./workers/agentWorker.js";
-import { AggregatorWorker } from "./workers/aggregatorWorker.js";
 import { IngestWorker } from "./workers/ingestWorker.js";
 import { ResumeWorker } from "./workers/resumeWorker.js";
-import { ToolsWorker } from "./workers/toolsWorker.js";
+import { BaseCheckpointSaver } from "@langchain/langgraph-checkpoint";
+
+/** Wrapper around createDeepAgent that returns Runnable to avoid TS2589 (excessively deep type instantiation). */
+function createDeepAgentRunnable(params?: CreateDeepAgentParams): ReactAgent<any> | Runnable {
+  return createDeepAgent(params as never);
+}
+
+/** Map subagent configs to CompiledSubAgent[] for the main agent's subagents. Ephemeral subagents get no checkpointer so their messages are not committed to the thread. */
+async function subagentsToCompiled(subagents: Subagent[] | undefined, checkpointer: BaseCheckpointSaver): Promise<CompiledSubAgent[]> {
+  if (!subagents?.length) return [];
+  return Promise.all(
+    subagents.map(async (g) => {
+      const subagentModel = g.model
+        ? await initChatModel(`${g.model.provider}:${g.model.model}`, {
+          apiKey: g.model.apiKey,
+          temperature: 0.3,
+          maxTokens: 300,
+        })
+        : undefined;
+      const customGraph = createDeepAgentRunnable({
+        model: subagentModel,
+        tools: g.tools,
+        checkpointer: g.ephemeral ? undefined : checkpointer,
+        systemPrompt: new SystemMessage(g.systemPrompt),
+      });
+      return {
+        name: g.name,
+        description: g.description,
+        runnable: customGraph,
+      } satisfies CompiledSubAgent;
+    })
+  );
+}
 
 export interface BullMQAgentWorkerOptions extends QueueOptions {
   /** Redis connection for RAG/document vector store only. If omitted, uses connection (queues/checkpointer use connection). */
   documentConnection?: ConnectionOptions;
-  /** Goals: id + systemPrompt; when a run/resume sets goal to an id, that goal's systemPrompt is used for the model. */
-  goals?: Goal[];
-  /** Async function returning system prompt for an agent. Order: goal systemPrompt (if set), then this, then messages. */
-  agentSystemPrompt?: (agentId: string) => Promise<SystemMessageFields[]>;
+  /** Default chat model (provider, model, apiKey). Used when getAgentConfig does not provide a model for the agent. */
+  chatModelOptions: ModelOptions;
+  /** Subagents; when run/resume sets subagentId, that subagent runs directly. Supports customer-support flows: replying, suggestions (use ephemeral: true), takeovers via request_human_approval and escalate_to_human; run/resume metadata is passed to configurable for CRM-owned state. */
+  subagents?: Subagent[];
+  /** System prompt for the main agent when there is no subagentId in the request. */
+  systemPrompt?: SystemMessageFields;
+  /** Async function returning per-agent config (systemPrompt, default model/temperature). Merged with worker chatModelOptions. */
+  getAgentConfig?: (agentId: string) => Promise<AgentConfig | undefined>;
+  /** Optional skills for progressive disclosure; descriptions go in system prompt, load_skill loads full content. */
+  skills?: Skill[];
   /** Embedding model for RAG/search and ingest (provider, model, apiKey). Pass apiKey from the caller (e.g. CLI). */
   embeddingModelOptions: ModelOptions;
   /** Logger passed to all workers. When provided, used for error/fail events; debug used for completed if available. */
@@ -39,8 +74,7 @@ export interface BullMQAgentWorkerOptions extends QueueOptions {
 }
 
 /**
- * Starts all workers (agent, tools, subagents, ingest) and provides a single close() to stop them.
- * Queues, checkpointer, and workers use `connection`. VectorStoreProvider uses `documentConnection` with `connection` as fallback.
+ * Starts all workers (agent, ingest) and provides a single close() to stop them.
  */
 export class BullMQAgentWorker {
   private readonly connection: ConnectionOptions;
@@ -48,33 +82,35 @@ export class BullMQAgentWorker {
   private vectorStoreProvider!: VectorStoreProvider;
   private checkpointer!: RedisSaver;
   private readonly options: Omit<QueueOptions, "connection">;
-  private readonly goals: Goal[] | undefined;
-  private readonly agentSystemPrompt?: (agentId: string) => Promise<SystemMessageFields[]>;
+  private readonly chatModelOptions: ModelOptions;
+  private readonly subagents: Subagent[] | undefined;
+  private readonly systemPrompt?: SystemMessageFields;
+  private readonly getAgentConfig?: (agentId: string) => Promise<AgentConfig | undefined>;
+  private readonly skills: Skill[] | undefined;
   private readonly embeddingModelOptions: ModelOptions;
 
   private readonly logger: AgentWorkerLogger;
 
   private agentWorker: AgentWorker | null = null;
-  private aggregatorWorker: AggregatorWorker | null = null;
-  private toolsWorker: ToolsWorker | null = null;
   private ingestWorker: IngestWorker | null = null;
-  private flowProducer: FlowProducer | null = null;
   private redisConnection: RedisConnection | null = null;
   private documentRedisConnection: RedisConnection | null = null;
 
   constructor(options: BullMQAgentWorkerOptions) {
-    const { documentConnection, connection, goals, agentSystemPrompt, embeddingModelOptions, logger, ...bullOptions } = options;
+    const { documentConnection, connection, chatModelOptions, subagents, systemPrompt, getAgentConfig, skills, embeddingModelOptions, logger, ...bullOptions } = options;
     this.connection = connection;
     this.documentConnection = documentConnection;
-    this.goals = goals;
-    this.agentSystemPrompt = agentSystemPrompt;
+    this.chatModelOptions = chatModelOptions;
+    this.subagents = subagents;
+    this.systemPrompt = systemPrompt;
+    this.getAgentConfig = getAgentConfig;
+    this.skills = skills;
     this.embeddingModelOptions = embeddingModelOptions;
     this.logger = logger ?? createDefaultAgentWorkerLogger();
     this.options = bullOptions;
   }
 
   async start(): Promise<void> {
-    // Queues and checkpointer: use connection only
     let queueClient: Redis | Cluster;
     let queueOptions: QueueOptions;
     if (isRedisInstance(this.connection)) {
@@ -86,7 +122,6 @@ export class BullMQAgentWorker {
       queueOptions = { ...this.options, connection: await this.redisConnection.client };
     }
 
-    // VectorStoreProvider: use documentConnection with connection as fallback
     const docConnection = this.documentConnection ?? this.connection;
     let documentClient: Redis | Cluster;
     if (docConnection === this.connection) {
@@ -109,22 +144,26 @@ export class BullMQAgentWorker {
       },
       prefix: this.options.prefix,
     });
-    const toolsQueue = createToolsQueue(queueOptions);
-    this.flowProducer = new FlowProducer(queueOptions);
 
-    const baseTools = [createSearchKnowledgeTool(this.vectorStoreProvider), requestHumanInTheLoop];
-    const goals = this.goals;
-    const goalTools = goals?.flatMap((g) => g.tools ?? []) ?? [];
-    const tools = [...baseTools, ...goalTools];
-    const agentSystemPrompt = this.agentSystemPrompt;
+    const baseTools = [
+      createSearchKnowledgeTool(this.vectorStoreProvider),
+      requestHumanInTheLoop,
+      escalateToHuman,
+      ...(this.skills?.length ? [createLoadSkillTool(this.skills)] : []),
+    ];
+    const subagentsConfig = this.subagents;
+    const compiledSubagents = subagentsConfig ? await subagentsToCompiled(subagentsConfig, this.checkpointer) : [];
+    const systemPrompt = this.systemPrompt;
+    const getAgentConfig = this.getAgentConfig;
+    const skills = this.skills;
 
     const compiledGraph = await compileGraph({
       tools: baseTools,
-      toolsQueue,
-      flowProducer: this.flowProducer,
       checkpointer: this.checkpointer,
-      goals,
-      agentSystemPrompt,
+      subagents: compiledSubagents,
+      systemPrompt,
+      getAgentConfig,
+      skills,
     });
 
     const resumeWorker = new ResumeWorker({ compiledGraph });
@@ -134,24 +173,13 @@ export class BullMQAgentWorker {
       {
         compiledGraph,
         resumeWorker,
+        chatModelOptions: this.chatModelOptions,
         embeddingModelOptions: this.embeddingModelOptions,
         logger: this.logger,
       },
       queueOptions
     );
     this.agentWorker.start();
-
-    this.aggregatorWorker = new AggregatorWorker(
-      { resumeWorker, embeddingModelOptions: this.embeddingModelOptions, logger: this.logger },
-      queueOptions
-    );
-    this.aggregatorWorker.start();
-
-    this.toolsWorker = new ToolsWorker(
-      { tools, goals, embeddingModelOptions: this.embeddingModelOptions, logger: this.logger },
-      queueOptions
-    );
-    this.toolsWorker.start();
 
     this.ingestWorker = new IngestWorker(
       { vectorStoreProvider: this.vectorStoreProvider, embeddingModelOptions: this.embeddingModelOptions, logger: this.logger },
@@ -161,19 +189,10 @@ export class BullMQAgentWorker {
   }
 
   /**
-   * Gracefully close all workers, the flow producer, and Redis connections.
+   * Gracefully close all workers and Redis connections.
    */
   async close(): Promise<void> {
-    await Promise.all([
-      this.agentWorker?.close(),
-      this.aggregatorWorker?.close(),
-      this.toolsWorker?.close(),
-      this.ingestWorker?.close(),
-    ]);
-    if (this.flowProducer) {
-      await this.flowProducer.close();
-      this.flowProducer = null;
-    }
+    await Promise.all([this.agentWorker?.close(), this.ingestWorker?.close()]);
     if (this.documentRedisConnection) {
       const client = await this.documentRedisConnection.client;
       await client.quit();
@@ -185,8 +204,6 @@ export class BullMQAgentWorker {
       this.redisConnection = null;
     }
     this.agentWorker = null;
-    this.aggregatorWorker = null;
-    this.toolsWorker = null;
     this.ingestWorker = null;
   }
 }

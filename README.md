@@ -2,22 +2,22 @@
 
 Scalable AI agent orchestration powered by [BullMQ](https://docs.bullmq.io/) and [LangChain](https://js.langchain.com/).
 
-Define goals and system prompts, connect any LLM, and let BullMQ handle the rest — tool execution, persistent checkpoints, and Redis-backed reliability. Built-in tools include RAG (search knowledge) and human-in-the-loop (request approval).
+Define subagents, system prompts, and per-agent config (getAgentConfig), connect any LLM, and let BullMQ handle the rest — tool execution, persistent checkpoints, and Redis-backed reliability. Built-in tools include RAG (search knowledge), human-in-the-loop (request approval), and escalate_to_human (full handoff).
 
 ## Features
 
-- **Goals & system prompts** — Configure goals with `id` and `systemPrompt`; the agent uses the selected goal’s system prompt for each run
+- **Subagents & system prompts** — Configure subagents with `name`, `description`, and `systemPrompt`; optional `tools` and `model` per subagent; when `subagentId` is set, that subagent runs directly
 - **Provider agnostic** — Works with any LLM supported by LangChain (`openai`, `anthropic`, `google-genai`, etc.) via `chatModelOptions` and `embeddingModelOptions`
 - **Persistent checkpoints** — LangGraph checkpointing in Redis; resume runs after interrupts
 - **Human-in-the-loop** — Built-in `request_human_approval` tool; agent can pause and wait for operator input, then resume with `resume` / `resumeAndWait`
 - **RAG** — Built-in `search_knowledge` tool; ingest documents per agent via `client.ingest()` and optional `VectorStoreProvider`
 - **Redis-backed** — Queues and checkpoints in Redis; vector store uses [@langchain/redis](https://js.langchain.com/docs/integrations/vectorstores/redis) (Redis Stack recommended for RediSearch)
-- **Type-safe** — Full TypeScript; `ModelOptions`, `RunOptions`, `Goal`, and queue types exported
+- **Type-safe** — Full TypeScript; `ModelOptions`, `RunOptions`, `Subagent`, `AgentConfig`, `Skill`, and queue types exported
 
 ## How It Works
 
 ```
-┌─────────┐    run(agentId, threadId, { messages, chatModelOptions, goalId? })
+┌─────────┐    run(agentId, threadId, { messages, subagentId? })
 │  Client  │─────────────────────────────────────────────────────────────────▶ Agent Queue
 └─────────┘                                                                           │
      ▲                                                                                ▼
@@ -34,13 +34,13 @@ Define goals and system prompts, connect any LLM, and let BullMQ handle the rest
 
 - **Client** enqueues `run` or `resume` jobs with `agentId`, `threadId`, and options. Use `runAndWait` / `resumeAndWait` for sync-style flows.
 - **AgentWorker** runs the LangGraph agent with built-in tools; checkpoints are stored in Redis.
-- **Tools, aggregator, and ingest** run as separate BullMQ workers; the library starts them together via `BullMQAgentWorker`.
+- **Tools, and ingest** run as separate BullMQ workers; the library starts them together via `BullMQAgentWorker`.
 
 Client and worker must use the same Redis `connection` and, if you set it, the same `prefix`.
 
-### Goals
+### Subagents
 
-A **goal** is an `{ id, systemPrompt }` pair. When you pass `goalId` in `RunOptions`, the agent uses that goal’s `systemPrompt` for the run. Goals are optional; you can also rely on `agentSystemPrompt(agentId)` on the worker.
+A **subagent** has `name`, `description`, and `systemPrompt`; optional `tools` and `model`. When you pass `subagentId` in `RunOptions`, that subagent runs directly. You can also use `getAgentConfig(agentId)` on the worker to load per-agent system prompt and default model/temperature.
 
 Sessions are identified by `agentId` + `threadId`. You pass **messages** (conversation history) on each `run`; the library does not persist chat history itself — checkpoint state is used for resuming interrupted runs.
 
@@ -73,16 +73,17 @@ docker run -d --name redis -p 6379:6379 redis/redis-stack
 
 ## Quick Start
 
-### 1. Define goals (optional)
+### 1. Define subagents (optional)
 
-Goals provide system prompts for the agent. `systemPrompt` is an array of `SystemMessageFields` (e.g. `[{ type: 'text', text: 'You are a helpful assistant.' }]`).
+Subagents provide system prompts and optional tools/model. Each has `name`, `description`, and `systemPrompt`. Optional `tools` and `model` override the default for that subagent.
 
 ```typescript
-import type { Goal } from "bullmq-ai-agent";
+import type { Subagent } from "bullmq-ai-agent";
 
-const goals: Goal[] = [
+const subagents: Subagent[] = [
   {
-    id: "default",
+    name: "default",
+    description: "General-purpose assistant",
     systemPrompt: [{ type: "text", text: "You are a helpful assistant. Use search_knowledge when needed." }],
   },
 ];
@@ -97,7 +98,7 @@ import { BullMQAgentWorker } from "bullmq-ai-agent";
 
 const worker = new BullMQAgentWorker({
   connection: { host: "localhost", port: 6379 },
-  goals,
+  subagents,
   embeddingModelOptions: {
     provider: "openai",
     model: "text-embedding-3-small",
@@ -110,7 +111,7 @@ await worker.start();
 
 ### 3. Use the client
 
-Use **BullMQAgentClient** to enqueue runs and ingest documents. Pass **messages** (conversation history) and **chatModelOptions** on each run; the library does not read `process.env` for API keys.
+Use **BullMQAgentClient** to enqueue runs and ingest documents. Pass **messages** (conversation history) on each run; the library does not read `process.env` for API keys.
 
 ```typescript
 import { BullMQAgentClient } from "bullmq-ai-agent";
@@ -135,8 +136,6 @@ const result = await client.runAndWait(
   agentId,
   threadId,
   {
-    chatModelOptions: { provider: "openai", model: "gpt-4o-mini", apiKey: process.env.OPENAI_API_KEY! },
-    goalId: "default",
     messages: storedMessages,
   },
   120_000
@@ -181,8 +180,7 @@ await client.close();
 
 **RunOptions**
 
-- `chatModelOptions: ModelOptions` — `{ provider, model, apiKey }`. Required; pass API key from your app.
-- `goalId?: string` — When set, the goal’s `systemPrompt` is used (must match a goal id on the worker).
+- `subagentId?: string` — When set, that subagent runs directly (must match a subagent name on the worker).
 - `messages: StoredMessage[]` — Conversation history for this run (e.g. from `mapChatMessagesToStoredMessages`).
 
 If `ttl` is exceeded on `runAndWait` or `resumeAndWait`, the wait fails (the job may still be running). Use a larger `ttl` for long runs or poll `getAgentJob(jobId)` for fire-and-forget flows.
@@ -194,8 +192,9 @@ If `ttl` is exceeded on `runAndWait` or `resumeAndWait`, the wait fails (the job
 | `connection` | `QueueOptions` | Redis connection (BullMQ). Client and worker must use the same connection and `prefix`. |
 | `prefix?` | `string` | Queue/key prefix (e.g. `QUEUE_PREFIX` env). Defaults to no prefix; use the same value as the client. |
 | `documentConnection?` | `ConnectionOptions` | Redis for vector store; defaults to `connection`. |
-| `goals?` | `Goal[]` | Goals with `id` and `systemPrompt`. |
-| `agentSystemPrompt?` | `(agentId: string) => Promise<SystemMessageFields[]>` | Extra system prompt per agent (after goal systemPrompt). |
+| `subagents?` | `Subagent[]` | Subagents with `name`, `description`, `systemPrompt`; optional `tools` and `model`. |
+| `getAgentConfig?` | `(agentId: string) => Promise<AgentConfig \| undefined>` | Per-agent config: systemPrompt, default model, temperature, maxTokens. |
+| `skills?` | `Skill[]` | Progressive disclosure: `name`, `description`, `content`; load_skill tool loads full content. |
 | `embeddingModelOptions` | `ModelOptions` | **Required.** Used for RAG and ingest. |
 
 **Methods**
@@ -209,7 +208,6 @@ If `ttl` is exceeded on `runAndWait` or `resumeAndWait`, the wait fails (the job
 - `lastMessage?: string` — Last AI text content when completed.  
 - `interruptPayload?: InterruptPayload` — When `status === 'interrupted'`:
   - **Human-in-the-loop:** `{ type: 'human', message?: string, options?: Record<string, unknown> }`. Pass the human's response (any value, e.g. `"Approved"` or `{ approved: true }`) as the second argument to `resume()` / `resumeAndWait()`.
-  - **External tools:** `{ type: 'aggregator', aggregatorJobId: string }`. The client automatically waits for this job when using `runAndWait` / `resumeAndWait`; no action needed.
 
 ### ModelOptions
 
@@ -223,12 +221,15 @@ interface ModelOptions {
 
 Pass from your app or CLI; the library does not read `process.env`. To load API keys from a `.env` file, call `import "dotenv/config"` (or equivalent) in your app or CLI entrypoint before using the library.
 
-### Goal
+### Subagent
 
 ```typescript
-interface Goal {
-  id: string;
-  systemPrompt: SystemMessageFields[];  // from @langchain/core/messages
+interface Subagent {
+  name: string;
+  description: string;
+  systemPrompt: SystemMessageFields;  // from @langchain/core/messages
+  tools?: StructuredToolInterface[];   // optional tools for this subagent
+  model?: ModelOptions;                // optional chat model override for this subagent
 }
 ```
 
@@ -272,8 +273,8 @@ You will be prompted for an OpenAI API key (stored in `.agent.json` for next run
 ## Exports
 
 - **Client / Worker:** `BullMQAgentClient`, `BullMQAgentWorker`, `BullMQAgentWorkerOptions`
-- **Types:** `RunOptions`, `RunResult`, `ResumeOptions`, `IngestDocument`, `IngestOptions`, `AgentJobResult`, `AggregatorJobData`, `InterruptPayload`, `HumanInterruptPayload`, `AggregatorInterruptPayload`, `MessageRole`, `ModelOptions`, `RunContext`, `Goal`
-- **Queues:** `createAgentQueue`, `createIngestQueue`, `createToolsQueue`, `createAggregatorQueue`, `QUEUE_NAMES` (queue name constants for custom workers or monitoring)
+- **Types:** `RunOptions`, `RunResult`, `ResumeOptions`, `IngestDocument`, `IngestOptions`, `AgentJobResult`, `EscalationPayload`, `InterruptPayload`, `HumanInterruptPayload`, `MessageRole`, `ModelOptions`, `RunContext`, `AgentConfig`, `Skill`, `Subagent`
+- **Queues:** `createAgentQueue`, `createIngestQueue`, `createToolsQueue`, `QUEUE_NAMES` (queue name constants for custom workers or monitoring)
 - **Agent / RAG:** `compileGraph`, `VectorStoreProvider`, `VectorStoreProviderOptions`
 
 ## Contributing

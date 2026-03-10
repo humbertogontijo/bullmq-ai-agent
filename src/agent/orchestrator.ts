@@ -1,209 +1,98 @@
-import { BaseMessage, mapStoredMessagesToChatMessages, StoredMessage, SystemMessage, SystemMessageFields, ToolMessage } from "@langchain/core/messages";
-import { StructuredToolInterface } from "@langchain/core/tools";
-import type { LangGraphRunnableConfig } from "@langchain/langgraph";
-import {
-  END,
-  interrupt,
-  isGraphInterrupt,
-  START,
-  StateGraph
-} from "@langchain/langgraph";
-import type { FlowProducer, Queue } from "bullmq";
-import { initChatModel } from "langchain";
-import type { ModelOptions, RunContext } from "../options.js";
-import { QUEUE_NAMES } from "../options.js";
-import type { AggregatorJobData, ToolJobData } from "../queues/types.js";
-import { getLastAIMessage, getToolCallIdsWithResponses } from "../utils/message.js";
-import { nextSnowflakeId } from "../utils/snowflake.js";
-import type { AgentStateType } from "./state.js";
-import { AgentState } from "./state.js";
+import type { SystemMessageFields } from "@langchain/core/messages";
+import type { StructuredToolInterface } from "@langchain/core/tools";
+import { CompiledSubAgent, createDeepAgent, type CreateDeepAgentParams } from "deepagents";
+import { initChatModel, SystemMessage } from "langchain";
+import type { AgentConfig, ModelOptions, Skill } from "../options.js";
+import { createProgressMiddleware } from "./progress.js";
+import type { RedisSaver } from "../redis/RedisSaver.js";
 
-/** Goal: id plus system prompt and optional custom tools used when this goal is selected for a run. */
-export interface Goal {
-  id: string;
-  systemPrompt: SystemMessageFields[];
-  /** Optional tools to add for this goal (merged with orchestrator context tools). */
+type TRunnable = CompiledSubAgent["runnable"]
+
+/** Subagent: name, description, system prompt, and optional tools/model. When subagentId is set, that subagent runs directly. */
+export interface Subagent {
+  name: string;
+  description: string;
+  systemPrompt: SystemMessageFields;
   tools?: StructuredToolInterface[];
+  model?: ModelOptions;
+  /** When true, this subagent's messages are not committed to the thread. Use for suggestions, autocomplete, or reply-draft subagents. Direct runs already omit checkpointer when ephemeral; future main-agent delegation may skip merging ephemeral subagent messages. */
+  ephemeral?: boolean;
 }
 
-/** Context bound when building the graph (worker-held queues and vector stores by agentId). */
-export interface OrchestratorContext {
-  tools: StructuredToolInterface[];
-  toolsQueue: Queue<ToolJobData>;
-  flowProducer: FlowProducer;
-  /** Optional goals; when a run/resume sets goal to an id, that goal's systemPrompt is used for the model. */
-  goals?: Goal[];
-  /** Async function returning system prompt for an agent. Order: goal systemPrompt (if set), then this, then messages. */
-  agentSystemPrompt?: (agentId: string) => Promise<SystemMessageFields[]>;
-}
-
-const internalTools = ["request_human_approval"];
-
-async function createLlm(opts: ModelOptions, tools: StructuredToolInterface[]) {
-  const llm = await initChatModel(`${opts.provider}:${opts.model}`, {
-    apiKey: opts.apiKey,
-    temperature: 0.3,
-    maxTokens: 300
-  });
-  return llm.bindTools(tools);
-}
-
-async function hookNode(
-  state: AgentStateType,
-  runnableConfig?: LangGraphRunnableConfig
-): Promise<Partial<AgentStateType>> {
-  if (!runnableConfig) return {};
-  const configurable = runnableConfig.configurable as RunContext;
-  const job = configurable?.job;
-  if (job?.updateProgress) {
-    await job.updateProgress({ stage: runnableConfig.runName });
-  }
-  return state;
+export type CompileGraphOptions = OrchestratorContext & {
+  checkpointer: RedisSaver;
 };
 
-function createModelNode(ctx: OrchestratorContext) {
-  const { tools, goals, agentSystemPrompt } = ctx;
-  return async function modelNode(
-    state: AgentStateType,
-    runnableConfig?: LangGraphRunnableConfig
-  ): Promise<Partial<AgentStateType>> {
-    if (!runnableConfig) return {};
-    const configurable = runnableConfig.configurable as RunContext;
-    const chatModelOptions = configurable.chatModelOptions ?? state.chatModelOptions;
-    if (!chatModelOptions) throw new Error("chatModelOptions required (pass in run or reuse from checkpoint on resume)");
-    const agentId = configurable.agentId;
-    const goalId = state.goalId ?? configurable.goalId;
-    const goal = goalId ? goals?.find((g) => g.id === goalId) : undefined;
-    const goalSystemPrompt = goal?.systemPrompt;
-    const effectiveTools = [...tools, ...(goal?.tools ?? [])];
-    const agentPrompt = agentSystemPrompt ? await agentSystemPrompt(agentId) : undefined;
-    const llm = await createLlm(chatModelOptions, effectiveTools);
-    const goalMessages: BaseMessage[] = goalSystemPrompt?.length
-      ? goalSystemPrompt.map((s) => new SystemMessage(s))
-      : [];
-    const agentMessages: BaseMessage[] = agentPrompt?.length
-      ? agentPrompt.map((s: SystemMessageFields) => new SystemMessage(s))
-      : [];
-    const messages = [...goalMessages, ...agentMessages, ...state.messages];
-    const response = await llm.invoke(messages);
-    return { chatModelOptions, messages: [response] };
-  };
+/** Context bound when building the graph (worker-held tools, checkpointer, optional subagents, optional skills). */
+export interface OrchestratorContext {
+  tools: StructuredToolInterface[];
+  /** Precompiled subagents for the main agent; when run/resume sets subagentId, that subagent's runnable is invoked directly. */
+  subagents?: CompiledSubAgent[];
+  /** System prompt for the main agent when there is no subagentId in the request. */
+  systemPrompt?: SystemMessageFields;
+  /** Async function returning per-agent config (systemPrompt, default model/temperature). Prepended at invoke time; run's chatModelOptions override. */
+  getAgentConfig?: (agentId: string) => Promise<AgentConfig | undefined>;
+  /** Optional skills for progressive disclosure; descriptions are injected into system prompt, load_skill tool loads full content. */
+  skills?: Skill[];
 }
 
-function createExecuteToolNode(ctx: OrchestratorContext) {
-  const { tools, goals, flowProducer } = ctx;
-  return async function executeToolNode(
-    state: AgentStateType,
-    runnableConfig: LangGraphRunnableConfig
-  ): Promise<Partial<AgentStateType> & { messages: AgentStateType["messages"] }> {
-    if (!runnableConfig) return { messages: [] };
-    const configurable = runnableConfig.configurable as RunContext;
-    const checkpointThreadId = configurable.thread_id;
-    const agentId = configurable.agentId;
-    const goalId = state.goalId ?? configurable.goalId;
-    const goal = goalId ? goals?.find((g) => g.id === goalId) : undefined;
-    const effectiveTools = [...tools, ...(goal?.tools ?? [])];
-    const chatModelOptions = configurable.chatModelOptions ?? state.chatModelOptions;
-    const clientThreadId = checkpointThreadId.includes(":") ? checkpointThreadId.split(":")[1]! : checkpointThreadId;
+/** Cache key for runnable cache (subagentId + model options). */
+function runnableCacheKey(subagentId: string | undefined, opts: ModelOptions): string {
+  return `${subagentId ?? "main"}:${opts.provider}:${opts.model}:${opts.apiKey?.slice(0, 8) ?? ""}`;
+}
 
-    const aiMsg = getLastAIMessage(state.messages);
-    if (!aiMsg?.tool_calls?.length) {
-      return { messages: [] };
-    }
+/** Wrapper around createDeepAgent that returns Runnable to avoid TS2589 (excessively deep type instantiation). */
+function createDeepAgentRunnable(params?: CreateDeepAgentParams): TRunnable {
+  return createDeepAgent(params as never) as unknown as TRunnable;
+}
 
-    const responded = getToolCallIdsWithResponses(state.messages);
-    const pending = aiMsg.tool_calls.filter((tc) => tc.id && !responded.has(tc.id));
-    if (pending.length === 0) {
-      return { messages: [] };
-    }
+/** Build a runnable (main agent or subagent) for the given subagentId and model options. */
+async function createRunnable(
+  ctx: CompileGraphOptions,
+  subagentId: string | undefined,
+  chatModelOptions: ModelOptions
+): Promise<TRunnable> {
+  const { tools, subagents, checkpointer, systemPrompt } = ctx;
 
-    const pendingInternalTools = pending.filter((tc) => internalTools.includes(tc.name));
-    const pendingExternalTools = pending.filter((tc) => !internalTools.includes(tc.name));
-    const flowChildren: Array<{ name: string; queueName: string; data: ToolJobData; opts?: { jobId: string } }> = [];
+  if (subagentId) {
+    const subagent = subagents?.find((g) => g.name === subagentId);
+    if (!subagent) throw new Error(`Unknown subagentId: ${subagentId}`);
+    return subagent.runnable;
+  }
 
-    for (const tc of pendingExternalTools) {
-      const toolCallId = tc.id ?? `tc-${Date.now()}-${tc.name}`;
-      const args = (tc.args as Record<string, unknown>) ?? {};
-      flowChildren.push({
-        name: "run",
-        queueName: QUEUE_NAMES.TOOLS,
-        data: {
-          agentId,
-          toolName: tc.name,
-          args,
-          toolCallId,
-          threadId: clientThreadId,
-        },
-        opts: { jobId: nextSnowflakeId() },
-      });
-    }
+  const { provider, model, ...options } = chatModelOptions;
+  const chatModel = await initChatModel(`${chatModelOptions.provider}:${chatModelOptions.model}`, options);
 
-    if (flowChildren.length > 0) {
-      const aggregatorData: AggregatorJobData = {
-        agentId,
-        threadId: clientThreadId,
-        chatModelOptions: chatModelOptions!,
-        goalId: configurable.goalId,
-      };
-      const aggregatorJobId = `agg-${nextSnowflakeId()}`;
-      try {
-        const { messages }: { messages: StoredMessage[] } = interrupt({
-          type: "aggregator",
-          aggregatorJobId,
-        });
-        return { messages: mapStoredMessagesToChatMessages(messages) };
-      } catch (err) {
-        if (!isGraphInterrupt(err)) throw err;
-        await flowProducer.add({
-          name: "aggregate",
-          queueName: QUEUE_NAMES.AGGREGATOR,
-          data: aggregatorData,
-          opts: { jobId: aggregatorJobId },
-          children: flowChildren,
-        });
-        throw err;
+  return createDeepAgentRunnable({
+    model: chatModel,
+    tools,
+    systemPrompt: systemPrompt ? new SystemMessage(systemPrompt) : "",
+    subagents: subagents?.length ? subagents : undefined,
+    checkpointer,
+    middleware: [createProgressMiddleware()]
+  });
+}
+
+export interface OrchestratorRunnables {
+  /** Get the runnable for the given subagentId (undefined = main agent) and model options. Cached per (subagentId, model). */
+  getRunnable(subagentId: string | undefined, chatModelOptions: ModelOptions): Promise<TRunnable>;
+}
+
+/** Build orchestrator runnables: main deep agent + subagent runnables. Tools run in-process. */
+export function buildOrchestratorRunnables(
+  ctx: CompileGraphOptions
+): OrchestratorRunnables {
+  const cache = new Map<string, TRunnable>();
+
+  return {
+    async getRunnable(subagentId: string | undefined, chatModelOptions: ModelOptions): Promise<TRunnable> {
+      const key = runnableCacheKey(subagentId, chatModelOptions);
+      let runnable = cache.get(key);
+      if (!runnable) {
+        runnable = await createRunnable(ctx, subagentId, chatModelOptions);
+        cache.set(key, runnable);
       }
-    }
-
-    const messages = await Promise.all(
-      pendingInternalTools.map(
-        async (tc) => {
-          const toolCallId = tc.id ?? `tc-${Date.now()}-${tc.name}`;
-          const t = effectiveTools.find((t) => t.name === tc.name);
-          const result = t ? await t.invoke(tc.args, runnableConfig) : undefined;
-          return new ToolMessage({
-            content: typeof result === "string" ? result : JSON.stringify(result ?? {}),
-            tool_call_id: toolCallId,
-          })
-        }
-      )
-    );
-    return { messages };
+      return runnable;
+    },
   };
-}
-
-function routeAfterTool(state: AgentStateType): "before_agent" | "after_agent" {
-  // After adding tool responses, always loop back to the model so it can produce the next message.
-  const aiMsg = getLastAIMessage(state.messages);
-  if (!aiMsg?.tool_calls?.length) return "after_agent";
-  return "before_agent";
-}
-
-export function buildOrchestratorGraph(context: OrchestratorContext) {
-  const builder = new StateGraph(AgentState)
-    .addNode("before_agent", hookNode)
-    .addNode("before_model", hookNode)
-    .addNode("model", createModelNode(context))
-    .addNode("after_model", hookNode)
-    .addNode("after_agent", hookNode)
-    .addNode("execute_tool", createExecuteToolNode(context))
-    .addEdge(START, "before_agent")
-    .addEdge("before_agent", "before_model")
-    .addEdge("before_model", "model")
-    .addEdge("model", "after_model")
-    .addEdge("after_model", "execute_tool")
-    .addConditionalEdges("execute_tool", routeAfterTool, { before_agent: "before_agent", after_agent: "after_agent" })
-    .addEdge("after_agent", END);
-
-  return builder;
 }

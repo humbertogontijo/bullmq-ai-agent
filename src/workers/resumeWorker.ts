@@ -1,8 +1,8 @@
-import type { BaseMessage } from "@langchain/core/messages";
+import type { BaseMessage, StoredMessage } from "@langchain/core/messages";
 import { Command } from "@langchain/langgraph";
-import { CompiledGraph } from "../agent/compile.js";
-import type { RunContext } from "../options.js";
-import type { AgentJobResult } from "../queues/types.js";
+import type { CompiledGraph } from "../agent/compile.js";
+import type { ModelOptions, RunContext } from "../options.js";
+import type { AgentJobResult, ResumeData } from "../queues/types.js";
 import { getLastAIMessage } from "../utils/message.js";
 
 export interface ResumeWorkerParams {
@@ -10,8 +10,8 @@ export interface ResumeWorkerParams {
 }
 
 /**
- * Holds the compiled graph and shared resume logic. Created once in BullMQAgentWorker
- * and passed to AgentWorker and AggregatorWorker so they share the same graph instance.
+ * Holds the compiled runnables and shared resume logic. Created once in BullMQAgentWorker
+ * and passed to AgentWorker so they share the same getRunnable instance.
  */
 export class ResumeWorker {
   private readonly compiledGraph: CompiledGraph;
@@ -21,21 +21,29 @@ export class ResumeWorker {
     this.compiledGraph = params.compiledGraph;
   }
 
-  /** Compiles the graph lazily and returns it. Used by AgentWorker for "run" and by both for resume. */
   async start() {
     if (this._started) return;
   }
 
-  /** Runs the shared resume flow using the stored graph. Returns AgentJobResult. */
-  async runResume(configurable: RunContext, result: unknown): Promise<AgentJobResult> {
+  /**
+   * Runs the shared resume flow using the runnable for the given subagentId and chatModelOptions.
+   * Returns AgentJobResult.
+   */
+  async runResume(
+    configurable: RunContext,
+    result: ResumeData,
+    subagentId: string | undefined,
+    chatModelOptions: ModelOptions
+  ): Promise<AgentJobResult> {
     if (!this.compiledGraph) {
       throw new Error("ResumeWorker not started");
     }
-    // Single invoke: Command(resume) loads checkpoint, applies human input, then continues to END (or next interrupt).
-    const state = await this.compiledGraph.invoke(new Command({ resume: result }), { configurable });
-    const interrupts = state?.["__interrupt__"];
-    if (interrupts?.length) {
-      return { status: "interrupted", interruptPayload: interrupts[0].value };
+    const runnable = await this.compiledGraph.getRunnable(subagentId, chatModelOptions);
+    const resumePayload = { content: result.content };
+    const state = await runnable.invoke(new Command({ resume: resumePayload }), { configurable });
+    const [interrupt] = state?.["__interrupt__"] ?? [];
+    if (interrupt) {
+      return { status: "interrupted", interruptPayload: interrupt.value };
     }
     const messages = state.messages as BaseMessage[] | undefined;
     const lastAIMessageContent = getLastAIMessage(messages ?? [])?.content;

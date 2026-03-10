@@ -6,13 +6,15 @@ import { AIMessage } from "@langchain/core/messages";
 vi.mock("../agent/compile.js");
 
 async function createResumeWorker(invokeResult: { messages?: unknown[]; __interrupt__?: { value: unknown }[] }) {
+  const invoke = vi.fn().mockResolvedValue(invokeResult);
+  const runnable = { invoke };
   const compiledGraph = {
-    invoke: vi.fn().mockResolvedValue(invokeResult),
+    getRunnable: vi.fn().mockResolvedValue(runnable),
   };
-  vi.mocked(compileGraph).mockResolvedValue(compiledGraph);
+  vi.mocked(compileGraph).mockResolvedValue(compiledGraph as Awaited<ReturnType<typeof compileGraph>>);
   const worker = new ResumeWorker({ compiledGraph: await compileGraph({} as never) });
   worker.start();
-  return { worker, compiledGraph };
+  return { worker, compiledGraph, runnable };
 }
 
 const baseConfigurable = {
@@ -23,12 +25,15 @@ const baseConfigurable = {
   embeddingModelOptions: { provider: "openai", model: "text-embedding-3-small", apiKey: "key" },
 };
 
+const subagentId = undefined;
+const chatModelOptions = baseConfigurable.chatModelOptions;
+
 describe("ResumeWorker.runResume", () => {
   it("returns completed with lastMessage when graph returns final messages", async () => {
     const aiMessage = new AIMessage({ content: "Done." });
     const { worker } = await createResumeWorker({ messages: [aiMessage], __interrupt__: [] });
 
-    const result = await worker.runResume(baseConfigurable as never, { messages: [] });
+    const result = await worker.runResume(baseConfigurable as never, { messages: [] }, subagentId, chatModelOptions);
 
     expect(result).toEqual({ status: "completed", lastMessage: JSON.stringify("Done.") });
   });
@@ -37,21 +42,43 @@ describe("ResumeWorker.runResume", () => {
     const payload = { type: "human", message: "Approve?" };
     const { worker } = await createResumeWorker({ messages: [], __interrupt__: [{ value: payload }] });
 
-    const result = await worker.runResume(baseConfigurable as never, "Approved");
+    const result = await worker.runResume(
+      baseConfigurable as never,
+      { content: "Approved" },
+      subagentId,
+      chatModelOptions
+    );
 
     expect(result).toEqual({ status: "interrupted", interruptPayload: payload });
   });
 
-  it("invokes graph with Command(resume: result)", async () => {
-    const { worker, compiledGraph } = await createResumeWorker({ messages: [], __interrupt__: [] });
-    const resumePayload = { messages: [{ type: "tool", data: { content: "ok", tool_call_id: "tc-1" } }] };
+  it("invokes runnable with Command(resume: { content })", async () => {
+    const { worker, compiledGraph, runnable } = await createResumeWorker({ messages: [], __interrupt__: [] });
+    const resumePayload = { content: "ok" };
 
-    await worker.runResume(baseConfigurable as never, resumePayload);
+    await worker.runResume(baseConfigurable as never, resumePayload, subagentId, chatModelOptions);
 
-    expect(compiledGraph.invoke).toHaveBeenCalledTimes(1);
-    const [command, options] = (compiledGraph.invoke as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(compiledGraph.getRunnable).toHaveBeenCalledWith(subagentId, chatModelOptions);
+    expect(runnable.invoke).toHaveBeenCalledTimes(1);
+    const [command, options] = (runnable.invoke as ReturnType<typeof vi.fn>).mock.calls[0]!;
     expect(command).toBeDefined();
-    expect(command?.resume).toEqual(resumePayload);
+    expect(command?.resume).toEqual({ content: "ok" });
     expect(options?.configurable).toEqual(baseConfigurable);
+  });
+
+  it("passes human resume result { content } as { content } to graph", async () => {
+    const { worker, runnable } = await createResumeWorker({ messages: [], __interrupt__: [] });
+
+    await worker.runResume(
+      baseConfigurable as never,
+      { content: "yes" },
+      subagentId,
+      chatModelOptions
+    );
+
+    const [command] = (runnable.invoke as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(command?.resume).toEqual({
+      content: "yes"
+    });
   });
 });

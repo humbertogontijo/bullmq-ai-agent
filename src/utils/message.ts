@@ -9,13 +9,3 @@ export function getLastAIMessage(messages: BaseMessage[]): AIMessage | null {
     }
     return null;
 }
-
-export function getToolCallIdsWithResponses(messages: BaseMessage[]): Set<string> {
-    const ids = new Set<string>();
-    for (const m of messages) {
-        if (ToolMessage.isInstance(m) && m.tool_call_id) {
-            ids.add(m.tool_call_id);
-        }
-    }
-    return ids;
-}
