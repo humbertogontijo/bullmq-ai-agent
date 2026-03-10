@@ -1,9 +1,10 @@
 import type { SystemMessageFields } from "@langchain/core/messages";
 import type { StructuredToolInterface } from "@langchain/core/tools";
-import { CompiledSubAgent, createDeepAgent, type CreateDeepAgentParams } from "deepagents";
+import { CompiledSubAgent, type CreateDeepAgentParams } from "deepagents";
 import { initChatModel, SystemMessage } from "langchain";
 import type { AgentConfig, ModelOptions, Skill } from "../options.js";
 import type { RedisSaver } from "../redis/RedisSaver.js";
+import { createDeepAgent } from "./createDeepAgent.js";
 import { createProgressMiddleware } from "./progress.js";
 
 type TRunnable = CompiledSubAgent["runnable"]
@@ -41,7 +42,7 @@ function runnableCacheKey(subagentId: string | undefined, opts: ModelOptions): s
   return `${subagentId ?? "main"}:${opts.provider}:${opts.model}:${opts.apiKey?.slice(0, 8) ?? ""}`;
 }
 
-/** Wrapper around createDeepAgent that returns Runnable to avoid TS2589 (excessively deep type instantiation). */
+/** Build deep agent without filesystem tools; returns Runnable to avoid TS2589 (excessively deep type instantiation). */
 function createDeepAgentRunnable(params?: CreateDeepAgentParams): TRunnable {
   return createDeepAgent(params as never) as unknown as TRunnable;
 }
