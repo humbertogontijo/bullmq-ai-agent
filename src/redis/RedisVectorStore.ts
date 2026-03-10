@@ -383,7 +383,13 @@ export class RedisVectorStore extends VectorStore {
       ...schemaArgs,
     ] as const;
 
-    await this.client.call(...createArgs);
+    try {
+      await this.client.call(...createArgs);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/index\s+already\s+exists/i.test(msg)) return;
+      throw err;
+    }
   }
 
   async dropIndex(deleteDocuments?: boolean): Promise<boolean> {

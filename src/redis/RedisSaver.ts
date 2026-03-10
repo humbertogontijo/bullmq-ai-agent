@@ -841,7 +841,7 @@ export class RedisSaver extends BaseCheckpointSaver {
         await this.client.call("FT.CREATE", ...args);
       } catch (error) {
         const msg = (error as Error)?.message ?? "";
-        if (!msg.includes("Index already exists"))
+        if (!/index\s+already\s+exists/i.test(msg))
           console.error(
             `Failed to create index ${schema.index}:`,
             msg

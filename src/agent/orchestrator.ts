@@ -1,11 +1,10 @@
 import type { SystemMessageFields } from "@langchain/core/messages";
 import type { StructuredToolInterface } from "@langchain/core/tools";
 import { CompiledSubAgent, createDeepAgent, type CreateDeepAgentParams } from "deepagents";
-import { SystemMessage } from "langchain";
-import { initChatModel } from "../chatModel.js";
+import { initChatModel, SystemMessage } from "langchain";
 import type { AgentConfig, ModelOptions, Skill } from "../options.js";
-import { createProgressMiddleware } from "./progress.js";
 import type { RedisSaver } from "../redis/RedisSaver.js";
+import { createProgressMiddleware } from "./progress.js";
 
 type TRunnable = CompiledSubAgent["runnable"]
 
@@ -27,8 +26,8 @@ export type CompileGraphOptions = OrchestratorContext & {
 /** Context bound when building the graph (worker-held tools, checkpointer, optional subagents, optional skills). */
 export interface OrchestratorContext {
   tools: StructuredToolInterface[];
-  /** Precompiled subagents for the main agent; when run/resume sets subagentId, that subagent's runnable is invoked directly. */
-  subagents?: CompiledSubAgent[];
+  /** Subagent specs for the main agent; when run/resume sets subagentId, that subagent's runnable is created via createDeepAgentRunnable and invoked. */
+  subagents?: Subagent[];
   /** System prompt for the main agent when there is no subagentId in the request. */
   systemPrompt?: SystemMessageFields;
   /** Async function returning per-agent config (systemPrompt, default model/temperature). Prepended at invoke time; run's chatModelOptions override. */
@@ -54,9 +53,28 @@ async function createRunnable(
   chatModelOptions: ModelOptions
 ): Promise<TRunnable> {
   const { tools, subagents, checkpointer, systemPrompt } = ctx;
+  const compiledSubagents = await Promise.all(subagents?.map(async (subagent) => {
+    const subagentModel = subagent.model ?? chatModelOptions;
+    const chaModel = await initChatModel(`${subagentModel.provider}:${subagentModel.model}`, {
+      apiKey: subagentModel.apiKey,
+      temperature: subagentModel.temperature,
+      maxTokens: subagentModel.maxTokens,
+    });
+    const runnable = createDeepAgentRunnable({
+      model: chaModel,
+      tools: subagent.tools,
+      systemPrompt: new SystemMessage(subagent.systemPrompt),
+      checkpointer: !subagent.ephemeral ? checkpointer : undefined,
+    });
+    return {
+      name: subagent.name,
+      description: subagent.description,
+      runnable,
+    } as CompiledSubAgent;
+  }) ?? []);
 
   if (subagentId) {
-    const subagent = subagents?.find((g) => g.name === subagentId);
+    const subagent = compiledSubagents?.find((g) => g.name === subagentId);
     if (!subagent) throw new Error(`Unknown subagentId: ${subagentId}`);
     return subagent.runnable;
   }
@@ -68,7 +86,7 @@ async function createRunnable(
     model: chatModel,
     tools,
     systemPrompt: systemPrompt ? new SystemMessage(systemPrompt) : "",
-    subagents: subagents?.length ? subagents : undefined,
+    subagents: compiledSubagents,
     checkpointer,
     middleware: [createProgressMiddleware()]
   });

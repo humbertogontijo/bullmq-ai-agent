@@ -2,13 +2,9 @@
  * Single entry point to start and stop all BullMQ agent workers.
  * Pass connection + optional queue prefix via options; CLI/examples can fill from env.
  */
-import { SystemMessage, type SystemMessageFields } from "@langchain/core/messages";
-import type { Runnable } from "@langchain/core/runnables";
+import { type SystemMessageFields } from "@langchain/core/messages";
 import { isRedisInstance, RedisConnection, type ConnectionOptions, type QueueOptions } from "bullmq";
-import { CompiledSubAgent, createDeepAgent, type CreateDeepAgentParams } from "deepagents";
 import type { Cluster, Redis } from "ioredis";
-import { ReactAgent } from "langchain";
-import { initChatModel } from "./chatModel.js";
 import { compileGraph } from "./agent/compile.js";
 import type { Subagent } from "./agent/orchestrator.js";
 import { escalateToHuman } from "./agent/tools/escalateToHuman.js";
@@ -22,39 +18,6 @@ import { AgentWorker } from "./workers/agentWorker.js";
 import { IngestWorker } from "./workers/ingestWorker.js";
 import { ResumeWorker } from "./workers/resumeWorker.js";
 import { SearchWorker } from "./workers/searchWorker.js";
-import { BaseCheckpointSaver } from "@langchain/langgraph-checkpoint";
-
-/** Wrapper around createDeepAgent that returns Runnable to avoid TS2589 (excessively deep type instantiation). */
-function createDeepAgentRunnable(params?: CreateDeepAgentParams): ReactAgent<any> | Runnable {
-  return createDeepAgent(params as never);
-}
-
-/** Map subagent configs to CompiledSubAgent[] for the main agent's subagents. Ephemeral subagents get no checkpointer so their messages are not committed to the thread. */
-async function subagentsToCompiled(subagents: Subagent[] | undefined, checkpointer: BaseCheckpointSaver): Promise<CompiledSubAgent[]> {
-  if (!subagents?.length) return [];
-  return Promise.all(
-    subagents.map(async (g) => {
-      const subagentModel = g.model
-        ? await initChatModel(`${g.model.provider}:${g.model.model}`, {
-          apiKey: g.model.apiKey,
-          temperature: 0.3,
-          maxTokens: 300,
-        })
-        : undefined;
-      const customGraph = createDeepAgentRunnable({
-        model: subagentModel,
-        tools: g.tools,
-        checkpointer: g.ephemeral ? undefined : checkpointer,
-        systemPrompt: new SystemMessage(g.systemPrompt),
-      });
-      return {
-        name: g.name,
-        description: g.description,
-        runnable: customGraph,
-      } satisfies CompiledSubAgent;
-    })
-  );
-}
 
 export interface BullMQAgentWorkerOptions extends QueueOptions {
   /** Redis connection for RAG/document vector store only. If omitted, uses connection (queues/checkpointer use connection). */
@@ -154,8 +117,6 @@ export class BullMQAgentWorker {
       escalateToHuman,
       ...(this.skills?.length ? [createLoadSkillTool(this.skills)] : []),
     ];
-    const subagentsConfig = this.subagents;
-    const compiledSubagents = subagentsConfig ? await subagentsToCompiled(subagentsConfig, this.checkpointer) : [];
     const systemPrompt = this.systemPrompt;
     const getAgentConfig = this.getAgentConfig;
     const skills = this.skills;
@@ -163,7 +124,7 @@ export class BullMQAgentWorker {
     const compiledGraph = await compileGraph({
       tools: baseTools,
       checkpointer: this.checkpointer,
-      subagents: compiledSubagents,
+      subagents: this.subagents,
       systemPrompt,
       getAgentConfig,
       skills,
