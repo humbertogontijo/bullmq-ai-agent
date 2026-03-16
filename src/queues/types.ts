@@ -1,5 +1,33 @@
-import type { StoredMessage } from "@langchain/core/messages";
-import type { ModelOptions } from "../options.js";
+import type { AIMessageFields, HumanMessageFields, RemoveMessageFields, SystemMessageFields, ToolMessageFields } from "@langchain/core/messages";
+import { AgentState } from "../agent/state.js";
+
+export interface StoredToolMessage {
+  type: "tool";
+  data: ToolMessageFields;
+}
+
+export interface StoredHumanMessage {
+  type: "human";
+  data: HumanMessageFields;
+}
+
+/** Stored form of an AI message (serializable). */
+export interface StoredAIMessage {
+  type: "ai";
+  data: AIMessageFields;
+}
+
+export interface StoredRemoveMessage {
+  type: "remove";
+  data: RemoveMessageFields;
+}
+
+export interface StoredSystemMessage {
+  type: "system";
+  data: SystemMessageFields;
+}
+
+export type StoredMessage = StoredToolMessage | StoredHumanMessage | StoredAIMessage | StoredRemoveMessage | StoredSystemMessage
 
 export interface AgentRunData {
   agentId: string;
@@ -13,43 +41,28 @@ export interface AgentRunData {
   };
 }
 
-/** Payload when the run was interrupted by the request_human_approval tool. Pass the human's response to resume(). CRM can use this plus run/resume metadata to track conversation owner and handoffs (no explicit owner type in the library). */
-export interface HumanInterruptPayload {
-  type: "human";
-  reason?: string;
-  context?: Record<string, unknown>;
-}
-
-/** Payload when the run ended via escalate_to_human (full handoff to human). */
-export interface EscalationPayload {
-  type: "escalate";
-  reason?: string;
-  context?: Record<string, unknown>;
-}
-
-export type InterruptPayload = HumanInterruptPayload | EscalationPayload;
-
-/** Resume payload: human-in-the-loop ({ content }) or escalation ({ reason, context }). */
-export type ResumeData = { content: string };
-
-export interface AgentResumeData {
+/** Agent queue job data for resumeTool: worker builds tool message from last job's AI tool_call_id. */
+export interface AgentResumeToolData {
   agentId: string;
   threadId: string;
-  result: ResumeData;
-  /** When present, select the same runnable (main or subagent) used for the run. */
+  /** Human response content for the request_human_approval tool. */
+  content: string;
+  /** Pass when resuming so the same runnable (main or subagent) is used. */
   subagentId?: string;
-  /** Optional run-level metadata. Passed to configurable for tools and getAgentConfig. */
+  /** Optional run-level metadata. */
   metadata?: Record<string, unknown>;
 }
 
-/** Agent queue job data: payload only; job name is "run" | "resume". */
-export type AgentJobData = AgentRunData | AgentResumeData;
+/** Agent queue job data (run or resumeTool). Discriminator is job name: "run" | "resumeTool". */
+export type AgentJobData = AgentRunData | AgentResumeToolData;
 
-export interface AgentJobResult {
-  status: "completed" | "interrupted" | "escalated";
-  lastMessage?: string;
-  interruptPayload?: InterruptPayload;
+/** One stream state chunk (serializable). When the graph interrupts (e.g. human-in-the-loop), the worker returns the serialized state (messages only); the client detects resume by checking if the last message is an AI message with tool_calls. */
+export interface StoredAgentState extends Omit<AgentState, 'messages' | '__interrupt__'> {
+  messages: StoredMessage[];
 }
+
+/** Job return value: final stream state (messages) and optional interrupt tool payload. */
+export type AgentJobResult = StoredAgentState;
 
 export type DocumentSource = { type: 'url' | 'file' | 'text'; content: string; metadata?: Record<string, unknown> }
 
@@ -63,7 +76,10 @@ export interface IngestJobData {
 
 /** Result of an ingest job (worker return value). */
 export interface IngestJobResult {
-  ingested: number;
+  /** Number of source documents ingested. */
+  documents: number;
+  /** Number of chunks (split documents) added to the vector store. */
+  chunks: number;
 }
 
 /**

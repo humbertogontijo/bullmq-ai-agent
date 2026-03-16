@@ -1,36 +1,31 @@
-import { tool } from "@langchain/core/tools";
-import { interrupt } from "@langchain/langgraph";
-import { HumanInterruptPayload } from "../../queues/types.js";
+import { tool, type ToolRuntime } from "@langchain/core/tools";
+import { GraphInterrupt } from "@langchain/langgraph";
+import { AgentState } from "../state.js";
+import { REQUEST_HUMAN_APPROVAL_REASON_DESCRIPTION, REQUEST_HUMAN_APPROVAL_TOOL_DESCRIPTION } from "../prompts.js";
 
 const schema = {
   type: "object" as const,
   properties: {
     reason: {
       type: "string" as const,
-      description: "Question or message to show the human",
-    },
-    context: {
-      type: "object" as const,
-      description: "Optional structured context",
-    },
+      description: REQUEST_HUMAN_APPROVAL_REASON_DESCRIPTION,
+    }
   },
   required: ["reason"],
 };
 
 /**
- * RAG search tool. Uses Redis vector store when available (see registerDefaultTools).
+ * Human-in-the-loop tool. Calls LangGraph interrupt() so the run pauses; the worker returns the
+ * chunk with __interrupt__ and the client can resume with human input. Also returns a marker string
+ * so the worker can detect interrupt from stream state when the graph does not emit __interrupt__.
  */
 export const requestHumanInTheLoop = tool(
-  async ({ reason, context }) => {
-    return interrupt({
-      type: "human",
-      reason: String(reason ?? "Approve or provide input."),
-      context: (context as Record<string, unknown>) ?? {},
-    } satisfies HumanInterruptPayload);
+  async (_input, runtime: ToolRuntime<AgentState>) => {
+    throw new GraphInterrupt([{ value: runtime.state }]);
   },
   {
     name: "request_human_approval",
-    description: "Pause and ask a human for approval or input. Pass message and optional options.",
+    description: REQUEST_HUMAN_APPROVAL_TOOL_DESCRIPTION,
     schema,
   }
 );

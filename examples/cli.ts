@@ -2,27 +2,27 @@
  * CLI helper for examples: start workers and create a client using env (REDIS_URL, etc.).
  * When run directly (npm run chat), starts an interactive menu to test each feature with the agent.
  * Prompts for OpenAI API key on first run and caches it in .agent.json.
+ * Job results are the final stream state (messages). Human-in-the-loop: client detects resume when the last message is an AI message with tool_calls and calls resumeTool with the human response content.
  */
 import * as clack from "@clack/prompts";
-import type { StoredMessage } from "@langchain/core/messages";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { MessageRole } from "bullmq-ai-agent";
-import { BullMQAgentClient, BullMQAgentWorker } from "bullmq-ai-agent";
+import { BullMQAgentClient, BullMQAgentWorker, isResumeRequired } from "bullmq-ai-agent";
 import type { ModelOptions } from "bullmq-ai-agent";
-import { ResumeData } from "../src/queues/types";
+import type { AgentJobResult, StoredAgentState, StoredMessage } from "bullmq-ai-agent";
 
 function toStoredMessages(history: Array<{ role: MessageRole; content: string }>): StoredMessage[] {
-  return history.map((m) => ({
-    type: (m.role === "assistant" ? "ai" : "human") as "human" | "ai",
-    data: {
-      content: m.content,
-      role: m.role,
-      name: undefined,
-      tool_call_id: undefined,
-    },
-  }));
+  return history.map((m) => {
+    const isAi = m.role === "assistant";
+    return {
+      type: (isAi ? "ai" : "human") as "human" | "ai",
+      data: isAi
+        ? { content: m.content, name: undefined, tool_calls: [] }
+        : { content: m.content, name: undefined, tool_call_id: undefined },
+    };
+  });
 }
 
 const AGENT_JSON_PATH = join(process.cwd(), ".agent.json");
@@ -88,11 +88,33 @@ export async function startWorkers(modelOptions: { chatModelOptions: ModelOption
   return workers;
 }
 
-/**
- * Create a client with default options from env. Call client.close() when done.
- */
-export function createClient(): BullMQAgentClient {
-  return new BullMQAgentClient(defaultOptions);
+/** True if wait() result is the fallback (no_job or job_not_found). */
+function isFallbackResult(result: unknown): result is { status: "no_job" | "job_not_found"; message?: string } {
+  return typeof result === "object" && result !== null && "status" in result && ((result as { status: string }).status === "no_job" || (result as { status: string }).status === "job_not_found");
+}
+
+/** Get last AI message content as string from a chunk's messages. */
+function getLastMessageFromChunk(chunk: StoredAgentState): string | undefined {
+  const messages = chunk?.messages ?? [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m?.type === "ai" && m.data?.content != null) {
+      return typeof m.data.content === "string" ? m.data.content : JSON.stringify(m.data.content);
+    }
+  }
+  return undefined;
+}
+
+/** Get human-in-the-loop prompt from last AI message tool call (e.g. request_human_approval reason). */
+function getHumanPromptFromChunk(chunk: StoredAgentState): string {
+  const messages = chunk?.messages ?? [];
+  const last = messages[messages.length - 1];
+  if (last?.type === "ai") {
+    const toolCalls = (last.data as { tool_calls?: Array<{ name: string; args?: { reason?: string } }> })?.tool_calls;
+    const hitl = Array.isArray(toolCalls) ? toolCalls.find((tc) => tc.name === "request_human_approval") : undefined;
+    if (hitl?.args?.reason) return hitl.args.reason;
+  }
+  return "Human input required";
 }
 
 // --- Interactive CLI (when run directly) ---
@@ -119,41 +141,38 @@ async function runTurn(
   const agentId = "default";
   const threadId = SESSION_ID;
   const messages = toStoredMessages([...history]);
-  const runResult = await client.run(agentId, threadId, { messages });
-  let result = await runResult.wait(WAIT_TTL);
+  const runResult = await client.run(agentId, threadId, { messages, ttl: WAIT_TTL });
+  let result = await runResult.promise;
 
-  if (result.status === "no_job" || result.status === "job_not_found") {
+  if (isFallbackResult(result)) {
     return { lastMessage: undefined, done: true };
   }
 
-  while (result.status === "interrupted") {
-    const payload = result.interruptPayload;
-    if (payload?.type === "human") {
-      const msg = payload?.message ?? "Human input required";
-      const humanInput = orExit(
-        await clack.text({
-          message: `[Human-in-the-loop] ${msg}`,
-          placeholder: "Your response...",
-        })
-      );
-      const resumeResult = await client.resume(agentId, threadId, { content: humanInput });
-      result = await resumeResult.wait(WAIT_TTL);
-      if (result.status === "no_job" || result.status === "job_not_found") {
-        return { lastMessage: undefined, done: true };
-      }
-      if (result.status === "interrupted") {
-        continue;
-      }
+  let chunk = isFallbackResult(result) ? undefined : (result as AgentJobResult);
+  while (chunk && isResumeRequired(chunk)) {
+    const prompt = getHumanPromptFromChunk(chunk);
+    const humanInput = orExit(
+      await clack.text({
+        message: `[Human-in-the-loop] ${prompt}`,
+        placeholder: "Your response...",
+      })
+    );
+    const resumeResult = await client.resumeTool(agentId, threadId, { content: humanInput, ttl: WAIT_TTL });
+    result = await resumeResult.promise;
+    if (isFallbackResult(result)) {
+      return { lastMessage: undefined, done: true };
     }
+    chunk = result as AgentJobResult;
   }
 
-  if (result.lastMessage) {
-    history.push({ role: "assistant", content: result.lastMessage });
+  const lastMessage = chunk ? getLastMessageFromChunk(chunk) : undefined;
+  if (lastMessage) {
+    history.push({ role: "assistant", content: lastMessage });
   }
-  return { lastMessage: result.lastMessage, done: true };
+  return { lastMessage, done: true };
 }
 
-async function flowBasicChat(client: BullMQAgentClient, workers: BullMQAgentWorker, modelOptions: { chatModelOptions: ModelOptions; embeddingModelOptions: ModelOptions }): Promise<void> {
+async function flowBasicChat(client: BullMQAgentClient, modelOptions: { chatModelOptions: ModelOptions; embeddingModelOptions: ModelOptions }): Promise<void> {
   const history: Array<{ role: MessageRole; content: string }> = [];
   clack.note("Chat with the agent. You'll be prompted for each message. Choose 'Back to menu' to exit this mode.", "Basic chat");
 
@@ -178,7 +197,7 @@ async function flowBasicChat(client: BullMQAgentClient, workers: BullMQAgentWork
   }
 }
 
-async function flowRag(client: BullMQAgentClient, workers: BullMQAgentWorker, modelOptions: { chatModelOptions: ModelOptions; embeddingModelOptions: ModelOptions }): Promise<void> {
+async function flowRag(client: BullMQAgentClient, modelOptions: { chatModelOptions: ModelOptions; embeddingModelOptions: ModelOptions }): Promise<void> {
   clack.note("RAG: ingest documents, then ask questions that use search_knowledge.", "RAG");
 
   const ingestNow = orExit(
@@ -197,12 +216,13 @@ async function flowRag(client: BullMQAgentClient, workers: BullMQAgentWorker, mo
         content: "The BullMQ agent runs tools and subagents as queue jobs. It uses Redis for the queue and for RAG.",
         metadata: { source: "readme" }
       },
+      ttl: WAIT_TTL,
     });
-    const ingestOut = await ingestResult.wait(WAIT_TTL);
-    if (ingestOut.status === "no_job" || ingestOut.status === "job_not_found") {
+    const ingestOut = await ingestResult.promise;
+    if (isFallbackResult(ingestOut)) {
       clack.log.warn("Ingest job could not be found.");
     } else {
-      clack.log.message(`Ingested ${ingestOut.ingested} document(s).`);
+      clack.log.message(`Ingested ${ingestOut.documents} document(s) (${ingestOut.chunks} chunks).`);
     }
   }
 
@@ -228,7 +248,7 @@ async function flowRag(client: BullMQAgentClient, workers: BullMQAgentWorker, mo
   }
 }
 
-async function flowHumanInTheLoop(client: BullMQAgentClient, workers: BullMQAgentWorker, modelOptions: { chatModelOptions: ModelOptions; embeddingModelOptions: ModelOptions }): Promise<void> {
+async function flowHumanInTheLoop(client: BullMQAgentClient, modelOptions: { chatModelOptions: ModelOptions; embeddingModelOptions: ModelOptions }): Promise<void> {
   clack.note("Send a message that triggers request_human_approval, then respond when prompted.", "Human-in-the-loop");
 
   const message =
@@ -254,7 +274,7 @@ async function main(): Promise<void> {
   const modelOptions = getModelOptions(apiKey);
 
   const workers = await startWorkers(modelOptions);
-  const client = createClient();
+  const client = new BullMQAgentClient({ ...defaultOptions });
 
   try {
     while (true) {
@@ -274,13 +294,13 @@ async function main(): Promise<void> {
 
       switch (choice) {
         case "basic":
-          await flowBasicChat(client, workers, modelOptions);
+          await flowBasicChat(client, modelOptions);
           break;
         case "rag":
-          await flowRag(client, workers, modelOptions);
+          await flowRag(client, modelOptions);
           break;
         case "hitl":
-          await flowHumanInTheLoop(client, workers, modelOptions);
+          await flowHumanInTheLoop(client, modelOptions);
           break;
       }
     }

@@ -1,7 +1,9 @@
 /**
  * Single entry point to start and stop all BullMQ agent workers.
  * Pass connection + optional queue prefix via options; CLI/examples can fill from env.
+ * Thread history is built from job return values; no RedisSaver/checkpointer by default.
  */
+import type { StructuredToolInterface } from "@langchain/core/tools";
 import { type SystemMessageFields } from "@langchain/core/messages";
 import { isRedisInstance, RedisConnection, type ConnectionOptions, type QueueOptions } from "bullmq";
 import type { Cluster, Redis } from "ioredis";
@@ -13,14 +15,23 @@ import { createLoadSkillTool } from "./agent/tools/loadSkill.js";
 import { createSearchKnowledgeTool } from "./agent/tools/searchKnowledge.js";
 import { AgentConfig, createDefaultAgentWorkerLogger, type AgentWorkerLogger, type ModelOptions, type Skill } from "./options.js";
 import { VectorStoreProvider } from "./rag/index.js";
-import { RedisSaver } from "./redis/RedisSaver.js";
+import { getQueueKeyPrefix } from "./queues/queueKeys.js";
 import { AgentWorker } from "./workers/agentWorker.js";
 import { IngestWorker } from "./workers/ingestWorker.js";
-import { ResumeWorker } from "./workers/resumeWorker.js";
 import { SearchWorker } from "./workers/searchWorker.js";
 
+/**
+ * Options for BullMQAgentWorker.
+ *
+ * **Required:** `connection`, `chatModelOptions`, `embeddingModelOptions` (from QueueOptions and below).
+ * **Optional:** all others. Valid combinations: you can omit subagents and use only getAgentConfig for
+ * per-agent prompts; or provide subagents with or without getAgentConfig. Skills are independent.
+ * Wrong config (e.g. subagentId at run time that does not match a subagent name) fails at first job.
+ */
 export interface BullMQAgentWorkerOptions extends QueueOptions {
-  /** Redis connection for RAG/document vector store only. If omitted, uses connection (queues/checkpointer use connection). */
+  /** Redis connection (required by QueueOptions). Same Redis and prefix as client. */
+  connection: ConnectionOptions;
+  /** Redis connection for RAG/document vector store only. If omitted, uses connection (queues use connection). */
   documentConnection?: ConnectionOptions;
   /** Default chat model (provider, model, apiKey). Used when getAgentConfig does not provide a model for the agent. */
   chatModelOptions: ModelOptions;
@@ -36,6 +47,10 @@ export interface BullMQAgentWorkerOptions extends QueueOptions {
   embeddingModelOptions: ModelOptions;
   /** Logger passed to all workers. When provided, used for error/fail events; debug used for completed if available. */
   logger?: AgentWorkerLogger;
+  /** When set, passed to getPreviousReturnvalues Lua as max number of previous jobs to load (limits history size). */
+  maxHistoryMessages?: number;
+  /** Optional custom tools to add to the main agent (merged with built-in tools: search_knowledge, request_human_approval, escalate_to_human, load_skill). Use for CRM-specific or domain tools. */
+  tools?: StructuredToolInterface[];
 }
 
 /**
@@ -45,7 +60,6 @@ export class BullMQAgentWorker {
   private readonly connection: ConnectionOptions;
   private readonly documentConnection: ConnectionOptions | undefined;
   private vectorStoreProvider!: VectorStoreProvider;
-  private checkpointer!: RedisSaver;
   private readonly options: Omit<QueueOptions, "connection">;
   private readonly chatModelOptions: ModelOptions;
   private readonly subagents: Subagent[] | undefined;
@@ -55,6 +69,8 @@ export class BullMQAgentWorker {
   private readonly embeddingModelOptions: ModelOptions;
 
   private readonly logger: AgentWorkerLogger;
+  private readonly maxHistoryMessages: number | undefined;
+  private readonly customTools: StructuredToolInterface[] | undefined;
 
   private agentWorker: AgentWorker | null = null;
   private ingestWorker: IngestWorker | null = null;
@@ -63,7 +79,7 @@ export class BullMQAgentWorker {
   private documentRedisConnection: RedisConnection | null = null;
 
   constructor(options: BullMQAgentWorkerOptions) {
-    const { documentConnection, connection, chatModelOptions, subagents, systemPrompt, getAgentConfig, skills, embeddingModelOptions, logger, ...bullOptions } = options;
+    const { documentConnection, connection, chatModelOptions, subagents, systemPrompt, getAgentConfig, skills, embeddingModelOptions, logger, maxHistoryMessages, tools: customTools, ...bullOptions } = options;
     this.connection = connection;
     this.documentConnection = documentConnection;
     this.chatModelOptions = chatModelOptions;
@@ -73,6 +89,8 @@ export class BullMQAgentWorker {
     this.skills = skills;
     this.embeddingModelOptions = embeddingModelOptions;
     this.logger = logger ?? createDefaultAgentWorkerLogger();
+    this.maxHistoryMessages = maxHistoryMessages;
+    this.customTools = customTools;
     this.options = bullOptions;
   }
 
@@ -102,20 +120,12 @@ export class BullMQAgentWorker {
       client: documentClient,
     });
 
-    this.checkpointer = new RedisSaver({
-      client: queueClient,
-      ttlConfig: {
-        defaultTTL: 60 * 24,
-        refreshOnRead: true,
-      },
-      prefix: this.options.prefix,
-    });
-
     const baseTools = [
       createSearchKnowledgeTool(this.vectorStoreProvider),
       requestHumanInTheLoop,
       escalateToHuman,
       ...(this.skills?.length ? [createLoadSkillTool(this.skills)] : []),
+      ...(this.customTools ?? []),
     ];
     const systemPrompt = this.systemPrompt;
     const getAgentConfig = this.getAgentConfig;
@@ -123,23 +133,24 @@ export class BullMQAgentWorker {
 
     const compiledGraph = await compileGraph({
       tools: baseTools,
-      checkpointer: this.checkpointer,
       subagents: this.subagents,
       systemPrompt,
       getAgentConfig,
       skills,
     });
 
-    const resumeWorker = new ResumeWorker({ compiledGraph });
-    resumeWorker.start();
+    const redis = queueClient as Redis;
+    const queueKeyPrefix = getQueueKeyPrefix(this.options.prefix);
 
     this.agentWorker = new AgentWorker(
       {
         compiledGraph,
-        resumeWorker,
+        redis,
+        queueKeyPrefix,
         chatModelOptions: this.chatModelOptions,
         embeddingModelOptions: this.embeddingModelOptions,
         logger: this.logger,
+        maxHistoryMessages: this.maxHistoryMessages,
       },
       queueOptions
     );

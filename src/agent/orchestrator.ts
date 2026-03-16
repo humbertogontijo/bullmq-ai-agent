@@ -1,11 +1,13 @@
+import type { BaseCheckpointSaver } from "@langchain/langgraph-checkpoint";
 import type { SystemMessageFields } from "@langchain/core/messages";
 import type { StructuredToolInterface } from "@langchain/core/tools";
 import { CompiledSubAgent } from "deepagents";
 import { initChatModel, SystemMessage } from "langchain";
 import type { AgentConfig, ModelOptions, Skill } from "../options.js";
-import type { RedisSaver } from "../redis/RedisSaver.js";
 import { createDeepAgent } from "./createDeepAgent.js";
-import { createProgressMiddleware } from "./progress.js";
+import { createHistoryMiddleware } from "./middlewares/history.js";
+import { createProgressMiddleware } from "./middlewares/progress.js";
+import { createSummarizationMiddleware } from "./middlewares/summarization.js";
 
 type TRunnable = Awaited<ReturnType<typeof createRunnable>>
 
@@ -20,14 +22,12 @@ export interface Subagent {
   ephemeral?: boolean;
 }
 
-export type CompileGraphOptions = OrchestratorContext & {
-  checkpointer: RedisSaver;
-};
+export type CompileGraphOptions = OrchestratorContext
 
-/** Context bound when building the graph (worker-held tools, checkpointer, optional subagents, optional skills). */
+/** Context bound when building the graph (worker-held tools, optional subagents, optional skills). */
 export interface OrchestratorContext {
   tools: StructuredToolInterface[];
-  /** Subagent specs for the main agent; when run/resume sets subagentId, that subagent's runnable is created via createDeepAgentRunnable and invoked. */
+  /** Subagent specs for the main agent; when run/resume sets subagentId, that subagent's runnable is created via createDeepAgent and invoked. */
   subagents?: Subagent[];
   /** System prompt for the main agent when there is no subagentId in the request. */
   systemPrompt?: SystemMessageFields;
@@ -48,7 +48,7 @@ async function createRunnable(
   subagentId: string | undefined,
   chatModelOptions: ModelOptions
 ) {
-  const { tools, subagents, checkpointer, systemPrompt } = ctx;
+  const { tools, subagents, systemPrompt } = ctx;
   const compiledSubagents = await Promise.all(subagents?.map(async (subagent) => {
     const subagentModel = subagent.model ?? chatModelOptions;
     const chaModel = await initChatModel(`${subagentModel.provider}:${subagentModel.model}`, {
@@ -60,7 +60,7 @@ async function createRunnable(
       model: chaModel,
       tools: subagent.tools,
       systemPrompt: new SystemMessage(subagent.systemPrompt),
-      checkpointer: !subagent.ephemeral ? checkpointer : undefined,
+      middleware: [createProgressMiddleware(), createHistoryMiddleware(), createSummarizationMiddleware()]
     });
     return {
       name: subagent.name,
@@ -83,8 +83,7 @@ async function createRunnable(
     tools,
     systemPrompt: systemPrompt ? new SystemMessage(systemPrompt) : "",
     subagents: compiledSubagents,
-    checkpointer,
-    middleware: [createProgressMiddleware()]
+    middleware: [createProgressMiddleware(), createHistoryMiddleware(), createSummarizationMiddleware()]
   });
 }
 

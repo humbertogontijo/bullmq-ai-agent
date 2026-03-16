@@ -5,9 +5,6 @@
 
 export { AgentWorker } from "./agentWorker.js";
 
-export { ResumeWorker } from "./resumeWorker.js";
-export type { ResumeWorkerParams } from "./resumeWorker.js";
-
 export { IngestWorker } from "./ingestWorker.js";
 export type { IngestWorkerParams } from "./ingestWorker.js";
 

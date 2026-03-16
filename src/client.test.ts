@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { BullMQAgentClient } from "./client.js";
+import { BullMQAgentClient, ClientResultError } from "./client.js";
+import { isResumeRequired } from "./utils/message.js";
+import type { ModelOptions } from "./options.js";
+import type { StoredAgentState, StoredHumanMessage } from "./queues/types.js";
 
 const mockAdd = vi.fn();
 const mockGetJob = vi.fn();
@@ -51,9 +54,9 @@ vi.mock("./options.js", () => ({
 
 const defaultClientOptions = { connection: { url: "redis://localhost" } };
 
-const testModelOptions = {
-  chatModelOptions: { provider: "openai", model: "gpt-4o-mini", apiKey: "test-key" } as const,
-  embeddingModelOptions: { provider: "openai", model: "text-embedding-3-small", apiKey: "test-key" } as const,
+const testModelOptions: { chatModelOptions: ModelOptions; embeddingModelOptions: ModelOptions } = {
+  chatModelOptions: { provider: "openai", model: "gpt-4o-mini", apiKey: "test-key" },
+  embeddingModelOptions: { provider: "openai", model: "text-embedding-3-small", apiKey: "test-key" },
 };
 
 describe("BullMQAgentClient", () => {
@@ -63,19 +66,22 @@ describe("BullMQAgentClient", () => {
     client = new BullMQAgentClient(defaultClientOptions);
     mockAdd.mockReset();
     mockGetJob.mockReset();
+    mockGetJob.mockResolvedValue({ waitUntilFinished: vi.fn().mockResolvedValue({ messages: [] }) });
     mockIngestAdd.mockReset();
     mockIngestAdd.mockResolvedValue({ id: "ingest-1" });
     mockIngestGetJob.mockReset();
+    mockIngestGetJob.mockResolvedValue({ waitUntilFinished: vi.fn().mockResolvedValue({}) });
     mockSearchAdd.mockReset();
     mockSearchAdd.mockResolvedValue({ id: "search-1" });
     mockSearchGetJob.mockReset();
+    mockSearchGetJob.mockResolvedValue({ waitUntilFinished: vi.fn().mockResolvedValue({ results: [], count: 0 }) });
   });
 
   describe("run", () => {
     it("returns jobId (fire-and-forget)", async () => {
       mockAdd.mockResolvedValue({ id: "job-1" });
 
-      const message = { type: "human", data: { content: "Hi", role: "user", name: undefined, tool_call_id: undefined } };
+      const message: StoredHumanMessage = { type: "human", data: { content: "Hi", name: undefined } };
       const threadId = "thread-1";
       const result = await client.run("default", threadId, { messages: [message] });
 
@@ -86,7 +92,8 @@ describe("BullMQAgentClient", () => {
           agentId: "default",
           threadId,
           input: { messages: [message] },
-        })
+        }),
+        expect.objectContaining({ jobId: expect.stringMatching(new RegExp(`^${threadId}/\\d+$`)) })
       );
     });
 
@@ -95,24 +102,24 @@ describe("BullMQAgentClient", () => {
       const result = await client.run(
         "my-agent",
         "thread-1",
-        { messages: [{ type: "human", data: { content: "Hi", role: "user", name: undefined, tool_call_id: undefined } }] }
+        { messages: [{ type: "human", data: { content: "Hi", name: undefined } }] }
       );
       expect(result.jobId).toBe("job-2");
       expect(mockAdd).toHaveBeenCalledWith(
         "run",
-        expect.objectContaining({ agentId: "my-agent" })
+        expect.objectContaining({ agentId: "my-agent" }),
+        expect.objectContaining({ jobId: expect.stringMatching(/^thread-1\/\d+$/) })
       );
     });
   });
 
   describe("run (awaitable ClientResult)", () => {
-    it("result.wait() returns completed when job finishes with status completed", async () => {
+    it("await result returns final state chunk when job completes", async () => {
       const jobId = "run-wait-1";
       const threadId = "thread-1";
       mockAdd.mockResolvedValue({ id: jobId });
       const mockWaitUntilFinished = vi.fn().mockResolvedValue({
-        status: "completed",
-        lastMessage: "Hi back",
+        messages: [{ type: "human", data: { content: "Hi", role: "user" } }, { type: "ai", data: { content: "Hi back", tool_calls: [] } }],
       });
       mockGetJob.mockResolvedValue({
         id: jobId,
@@ -122,53 +129,66 @@ describe("BullMQAgentClient", () => {
       const runResult = await client.run(
         "default",
         threadId,
-        { messages: [{ type: "human", data: { content: "Hi", role: "user", name: undefined, tool_call_id: undefined } }] }
+        { messages: [{ type: "human", data: { content: "Hi", name: undefined } }], ttl: 5_000 }
       );
-      const result = await runResult.wait(5_000);
+      const result = await runResult.promise;
 
-      expect(result.status).toBe("completed");
-      expect(result.lastMessage).toBe("Hi back");
+      expect(result).toBeDefined();
+      expect(result.messages).toBeDefined();
     });
 
-    it("runResult.wait() resolves to AgentJobResult (default TTL)", async () => {
+    it("await runResult resolves to AgentJobResult (default TTL)", async () => {
       const jobId = "run-await-1";
       mockAdd.mockResolvedValue({ id: jobId });
       mockGetJob.mockResolvedValue({
         id: jobId,
-        waitUntilFinished: vi.fn().mockResolvedValue({ status: "completed", lastMessage: "Done" }),
+        waitUntilFinished: vi.fn().mockResolvedValue({ messages: [{ type: "ai", data: { content: "Done", tool_calls: [] } }] }),
       });
 
-      const runResult = await client.run("default", "t1", { messages: [{ type: "human", data: { content: "Hi", role: "user", name: undefined, tool_call_id: undefined } }] });
-      const result = await runResult.wait();
+      const runResult = await client.run("default", "t1", { messages: [{ type: "human", data: { content: "Hi", name: undefined } }] });
+      const result = await runResult.promise;
 
-      expect(result.status).toBe("completed");
-      expect(result.lastMessage).toBe("Done");
+      expect(result).toBeDefined();
+      expect(result.messages).toBeDefined();
     });
 
-    it("result.wait() returns interrupted with payload when job finishes with status interrupted (does not hang)", async () => {
+    it("await result returns serialized state (messages) when job finishes interrupted (does not hang)", async () => {
       const jobId = "run-wait-2";
       mockAdd.mockResolvedValue({ id: jobId });
-      const interruptPayload = { type: "human", message: "Approve?" };
       mockGetJob.mockResolvedValue({
         id: jobId,
-        waitUntilFinished: vi.fn().mockResolvedValue({
-          status: "interrupted",
-          interruptPayload,
-        }),
+        waitUntilFinished: vi.fn().mockResolvedValue({ messages: [] }),
       });
 
       const runResult = await client.run(
         "default",
         "t2",
-        { chatModelOptions: testModelOptions.chatModelOptions, messages: [{ type: "human", data: { content: "Do it", role: "user", name: undefined, tool_call_id: undefined } }] }
+        { messages: [{ type: "human", data: { content: "Do it", name: undefined } }], ttl: 5_000 }
       );
-      const result = await runResult.wait(5_000);
+      const result = await runResult.promise;
 
-      expect(result.status).toBe("interrupted");
-      expect(result.interruptPayload).toEqual(interruptPayload);
+      expect(result).toBeDefined();
+      expect(result.messages).toBeDefined();
+      expect(Array.isArray(result.messages)).toBe(true);
     });
 
-    it("result.wait() resolves within ttl when job returns interrupted (no hang)", async () => {
+    it("rejects with ClientResultError when job not found", async () => {
+      mockAdd.mockResolvedValue({ id: "job-1" });
+      mockGetJob.mockResolvedValue(null);
+
+      const runResult = await client.run("default", "thread-1", {
+        messages: [{ type: "human", data: { content: "Hi", name: undefined } }],
+        ttl: 5_000,
+      });
+
+      await expect(runResult.promise).rejects.toThrow(ClientResultError);
+      await expect(runResult.promise).rejects.toMatchObject({
+        status: "job_not_found",
+        message: expect.stringContaining("Job job-1 not found"),
+      });
+    });
+
+    it("await result resolves within ttl when job returns interrupted (no hang)", async () => {
       mockAdd.mockResolvedValue({ id: "j1" });
       mockGetJob.mockResolvedValue({
         id: "j1",
@@ -181,13 +201,13 @@ describe("BullMQAgentClient", () => {
       const runResult = await client.run(
         "default",
         "thread-1",
-        { chatModelOptions: testModelOptions.chatModelOptions, messages: [{ type: "human", data: { content: "x", role: "user", name: undefined, tool_call_id: undefined } }] }
+        { chatModelOptions: testModelOptions.chatModelOptions, messages: [{ type: "human", data: { content: "x", name: undefined } }], ttl: 10_000 }
       );
       const start = Date.now();
       const result = await Promise.race([
-        runResult.wait(10_000),
+        runResult.promise,
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("wait() hung")), 2000)
+          setTimeout(() => reject(new Error("await hung")), 2000)
         ),
       ]);
       const elapsed = Date.now() - start;
@@ -198,59 +218,151 @@ describe("BullMQAgentClient", () => {
   });
 
   describe("resume", () => {
-    it("returns jobId and wait() (fire-and-forget or await result.wait())", async () => {
+    it("adds run job with messages (resume)", async () => {
       mockAdd.mockResolvedValue({ id: "resume-1" });
 
-      const resumeData = { content: "Approved" };
-      const result = await client.resume("default", "t1", resumeData);
+      const messages: StoredHumanMessage[] = [
+        { type: "human", data: { content: "Hi", name: undefined } },
+        { type: "human", data: { content: "Approved", name: undefined } },
+      ];
+      const result = await client.resume("default", "t1", { messages });
 
       expect(result.jobId).toBe("resume-1");
-      expect(typeof result.wait).toBe("function");
+      expect(typeof result.promise).toBe("object");
       expect(mockAdd).toHaveBeenCalledWith(
-        "resume",
-        expect.objectContaining({ agentId: "default", threadId: "t1", result: resumeData })
+        "run",
+        expect.objectContaining({
+          agentId: "default",
+          threadId: "t1",
+          input: { messages },
+        }),
+        expect.objectContaining({ jobId: expect.stringMatching(/^t1\/\d+$/) })
       );
     });
 
-    it("result.wait() returns completed when resume job finishes", async () => {
+    it("await result returns chunk when resume job finishes", async () => {
       mockAdd.mockResolvedValue({ id: "resume-wait-1" });
       mockGetJob.mockResolvedValue({
         id: "resume-wait-1",
-        waitUntilFinished: vi.fn().mockResolvedValue({
-          status: "completed",
-          lastMessage: "Done.",
-        }),
+        waitUntilFinished: vi.fn().mockResolvedValue({ messages: [{ type: "ai", data: { content: "Done.", tool_calls: [] } }] }),
       });
 
-      const resumeData = { content: "Approved" };
-      const resumeResult = await client.resume("default", "t1", resumeData);
-      const result = await resumeResult.wait(5_000);
+      const resumeData = {
+        messages: [{ type: "human", data: { content: "Approved", name: undefined } } satisfies StoredHumanMessage],
+      };
+      const resumeResult = await client.resume("default", "t1", { ...resumeData, ttl: 5_000 });
+      const result = await resumeResult.promise;
 
-      expect(result.status).toBe("completed");
-      expect(result.lastMessage).toBe("Done.");
+      expect(result.messages).toBeDefined();
     });
 
-    it("result.wait() returns interrupted when resume job finishes with human interrupt (does not hang)", async () => {
+    it("await result returns serialized state when resume job finishes interrupted (does not hang)", async () => {
       mockAdd.mockResolvedValue({ id: "resume-wait-2" });
       mockGetJob.mockResolvedValue({
         id: "resume-wait-2",
-        waitUntilFinished: vi.fn().mockResolvedValue({
-          status: "interrupted",
-          interruptPayload: { type: "human", message: "Approve?" },
-        }),
+        waitUntilFinished: vi.fn().mockResolvedValue({ messages: [] }),
       });
 
-      const resumeData = { content: "Approved" };
-      const resumeResult = await client.resume("default", "t1", resumeData);
-      const result = await resumeResult.wait(5_000);
+      const resumeData = { messages: [{ type: "human", data: { content: "Approved", name: undefined } } satisfies StoredHumanMessage] };
+      const resumeResult = await client.resume("default", "t1", { ...resumeData, ttl: 5_000 });
+      const result = await resumeResult.promise;
 
-      expect(result.status).toBe("interrupted");
-      expect(result.interruptPayload).toEqual({ type: "human", message: "Approve?" });
+      expect(result).toBeDefined();
+      expect(result.messages).toBeDefined();
+    });
+  });
+
+  describe("run then resumeTool cycle", () => {
+    it("when first run returns resume-required result, resumeTool completes the flow", async () => {
+      const threadId = "t-cycle";
+      const jobIdRun = "t-cycle/1001";
+      const jobIdResume = "t-cycle/1002";
+      const resumeRequiredResult: StoredAgentState = {
+        messages: [
+          { type: "human", data: { content: "Approve this", name: undefined } },
+          {
+            type: "ai",
+            data: {
+              content: "",
+              tool_calls: [{ id: "call_1", name: "request_human_approval", args: { reason: "Proceed?" } }],
+            },
+          },
+        ],
+      };
+      const finalResult: StoredAgentState = {
+        messages: [
+          ...resumeRequiredResult.messages,
+          { type: "tool", data: { content: "Approved", tool_call_id: "call_1", name: "request_human_approval" } },
+          { type: "ai", data: { content: "Done.", tool_calls: [] } },
+        ],
+      };
+      mockAdd
+        .mockResolvedValueOnce({ id: jobIdRun })
+        .mockResolvedValueOnce({ id: jobIdResume });
+      mockGetJob
+        .mockResolvedValueOnce({
+          id: jobIdRun,
+          waitUntilFinished: vi.fn().mockResolvedValue(resumeRequiredResult),
+        })
+        .mockResolvedValueOnce({
+          id: jobIdResume,
+          waitUntilFinished: vi.fn().mockResolvedValue(finalResult),
+        });
+
+      const runResult = await client.run("agent-1", threadId, {
+        messages: [{ type: "human", data: { content: "Approve this", name: undefined } }],
+        ttl: 5_000,
+      });
+      const first = await runResult.promise;
+      expect(isResumeRequired(first)).toBe(true);
+
+      const resumeToolResult = await client.resumeTool("agent-1", threadId, { content: "Approved", ttl: 5_000 });
+      expect(mockAdd).toHaveBeenLastCalledWith(
+        "resumeTool",
+        expect.objectContaining({ agentId: "agent-1", threadId, content: "Approved" }),
+        expect.objectContaining({ jobId: expect.stringMatching(new RegExp(`^${threadId}/\\d+$`)) })
+      );
+      const second = await resumeToolResult.promise;
+      expect(second).toBeDefined();
+      expect(second.messages?.length).toBeGreaterThan(resumeRequiredResult.messages.length);
+    });
+  });
+
+  describe("resumeTool", () => {
+    it("adds resumeTool job with content", async () => {
+      mockAdd.mockResolvedValue({ id: "resume-tool-1" });
+
+      const result = await client.resumeTool("default", "t1", { content: "Approved" });
+
+      expect(result.jobId).toBe("resume-tool-1");
+      expect(mockAdd).toHaveBeenCalledWith(
+        "resumeTool",
+        expect.objectContaining({
+          agentId: "default",
+          threadId: "t1",
+          content: "Approved",
+        }),
+        expect.objectContaining({ jobId: expect.stringMatching(/^t1\/\d+$/) })
+      );
+    });
+
+    it("await result returns chunk when resumeTool job finishes", async () => {
+      mockAdd.mockResolvedValue({ id: "resume-tool-wait-1" });
+      mockGetJob.mockResolvedValue({
+        id: "resume-tool-wait-1",
+        waitUntilFinished: vi.fn().mockResolvedValue({ messages: [{ type: "ai", data: { content: "Done.", tool_calls: [] } }] }),
+      });
+
+      const resumeResult = await client.resumeTool("default", "t1", { content: "Yes", ttl: 5_000 });
+      const result = await resumeResult.promise;
+
+      expect(result).toBeDefined();
+      expect(result.messages).toBeDefined();
     });
   });
 
   describe("ingest", () => {
-    it("returns jobId and wait() (fire-and-forget or await result.wait())", async () => {
+    it("returns jobId and is awaitable (fire-and-forget or await result)", async () => {
       mockIngestAdd.mockResolvedValue({ id: "ingest-1" });
 
       const result = await client.ingest({
@@ -263,28 +375,29 @@ describe("BullMQAgentClient", () => {
         source: { type: "text", content: "Doc 1" },
       });
       expect(result.jobId).toBe("ingest-1");
-      expect(typeof result.wait).toBe("function");
+      expect(typeof result.promise).toBe("object");
     });
 
-    it("result.wait() returns ingest result when job completes", async () => {
+    it("await result returns ingest result when job completes", async () => {
       mockIngestAdd.mockResolvedValue({ id: "ingest-2" });
       mockIngestGetJob.mockResolvedValue({
         id: "ingest-2",
-        waitUntilFinished: vi.fn().mockResolvedValue({ ingested: 3 }),
+        waitUntilFinished: vi.fn().mockResolvedValue({ documents: 3, chunks: 10 }),
       });
 
       const ingestResult = await client.ingest({
         agentId: "default",
         source: { type: "text", content: "Doc 1" },
+        ttl: 5_000,
       });
-      const result = await ingestResult.wait(5_000);
+      const result = await ingestResult.promise;
 
-      expect(result).toEqual({ ingested: 3 });
+      expect(result).toEqual({ documents: 3, chunks: 10 });
     });
   });
 
   describe("searchKnowledge", () => {
-    it("returns jobId and wait() (fire-and-forget or await result.wait())", async () => {
+    it("returns jobId and is awaitable (fire-and-forget or await result)", async () => {
       mockSearchAdd.mockResolvedValue({ id: "search-1" });
 
       const result = await client.searchKnowledge("default", "some query", { k: 3 });
@@ -295,7 +408,7 @@ describe("BullMQAgentClient", () => {
         k: 3,
       });
       expect(result.jobId).toBe("search-1");
-      expect(typeof result.wait).toBe("function");
+      expect(typeof result.promise).toBe("object");
     });
 
     it("uses default k=5 when options omitted", async () => {
@@ -310,7 +423,7 @@ describe("BullMQAgentClient", () => {
       });
     });
 
-    it("result.wait() returns search result when job completes", async () => {
+    it("await result returns search result when job completes", async () => {
       mockSearchAdd.mockResolvedValue({ id: "search-3" });
       mockSearchGetJob.mockResolvedValue({
         id: "search-3",
@@ -320,8 +433,8 @@ describe("BullMQAgentClient", () => {
         }),
       });
 
-      const searchResult = await client.searchKnowledge("default", "query", { k: 5 });
-      const result = await searchResult.wait(5_000);
+      const searchResult = await client.searchKnowledge("default", "query", { k: 5, ttl: 5_000 });
+      const result = await searchResult.promise;
 
       expect(result).toEqual({
         results: [{ content: "doc 1", metadata: {} }],

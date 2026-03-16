@@ -2,17 +2,22 @@ import { tool } from "@langchain/core/tools";
 import type { LangGraphRunnableConfig } from "@langchain/langgraph";
 import type { RunContext } from "../../options.js";
 import type { VectorStoreProvider } from "../../rag/index.js";
+import {
+  SEARCH_KNOWLEDGE_K_DESCRIPTION,
+  SEARCH_KNOWLEDGE_QUERY_DESCRIPTION,
+  SEARCH_KNOWLEDGE_TOOL_DESCRIPTION,
+} from "../prompts.js";
 
 const schema = {
   type: "object" as const,
   properties: {
     query: {
       type: "string" as const,
-      description: "Search query for the knowledge base",
+      description: SEARCH_KNOWLEDGE_QUERY_DESCRIPTION,
     },
     k: {
       type: "number" as const,
-      description: "Number of results to return",
+      description: SEARCH_KNOWLEDGE_K_DESCRIPTION,
       default: 5,
     },
   },
@@ -54,7 +59,7 @@ export function createSearchKnowledgeTool(
     },
     {
       name: "search_knowledge",
-      description: "Search the knowledge base (RAG) for relevant documents.",
+      description: SEARCH_KNOWLEDGE_TOOL_DESCRIPTION,
       schema,
     }
   );

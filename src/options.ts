@@ -1,5 +1,7 @@
 import type { SystemMessageFields } from "@langchain/core/messages";
 import { Job } from "bullmq";
+import type { Redis } from "ioredis";
+import { z } from "zod";
 
 export interface AgentWorkerLogger {
   error: (msg: string, err?: Error) => void;
@@ -15,6 +17,9 @@ export function createDefaultAgentWorkerLogger(): AgentWorkerLogger {
     debug: (msg) => console.debug(msg),
   };
 }
+
+/** Minimal Redis interface for thread history and job tracking. Allows mocks in tests. */
+export type RedisLike = Pick<Redis, "eval" | "zadd">;
 
 /** Default queue name values (agent, ingest, search). */
 export const QUEUE_NAMES = {
@@ -53,14 +58,62 @@ export interface Skill {
   content: string | (() => Promise<string>);
 }
 
-/** Per-run data passed in graph configurable (threadId/agentId; optional subagent, model options, metadata from run/resume). */
-export interface RunContext extends Record<string, any> {
+/**
+ * Schema for per-run context passed in graph configurable and via config.context to middlewares.
+ * This is the stable contract for the agent worker: tools and getAgentConfig receive this via configurable.
+ * Do not remove or rename fields without updating the worker and all tools that read from configurable.
+ */
+export const runContextContextSchema = z.object({
+  /** Current BullMQ job; used by progress middleware and for job metadata. */
+  job: z.custom<Job>(),
+  /** Agent id for this run (e.g. tenant or bot id). */
+  agentId: z.string(),
+  /** Thread id (conversation id). Used for history and jobId format threadId/<snowflake>. */
+  thread_id: z.string(),
+  /** When set, the runnable for this subagent is used directly. */
+  subagentId: z.string().optional(),
+  /** Chat model options for this run (merged from worker default + getAgentConfig). */
+  chatModelOptions: z.any().optional(),
+  /** Embedding model options (for search_knowledge and RAG). */
+  embeddingModelOptions: z.custom<ModelOptions>().optional(),
+  /** Optional metadata from run/resume job data. CRM can pass owner, tenant, etc.; tools and getAgentConfig can read it. */
+  metadata: z.record(z.unknown()).optional(),
+  /** Redis client; set by worker so history middleware can load thread history. */
+  redis: z.custom<RedisLike>().optional(),
+  /** BullMQ queue key prefix; used by history middleware. */
+  queueKeyPrefix: z.string().optional(),
+  /** When set, passed to getPreviousReturnvalues Lua as max number of previous jobs to load (limits history size). */
+  maxHistoryMessages: z.number().optional(),
+});
+
+/** Per-run data passed in graph configurable. Type derived from runContextContextSchema. */
+export type RunContext = z.infer<typeof runContextContextSchema>;
+
+/**
+ * Build RunContext for a single job. Use in the agent worker so context shape and defaults live in one place.
+ */
+export function buildRunContext(params: {
   job: Job;
   agentId: string;
   thread_id: string;
   subagentId?: string;
   chatModelOptions?: ModelOptions;
   embeddingModelOptions?: ModelOptions;
-  /** Optional metadata from run/resume job data. CRM can pass owner, tenant, etc.; tools and getAgentConfig can read it. */
   metadata?: Record<string, unknown>;
+  redis?: RedisLike;
+  queueKeyPrefix?: string;
+  maxHistoryMessages?: number;
+}): RunContext {
+  return {
+    job: params.job,
+    agentId: params.agentId,
+    thread_id: params.thread_id,
+    subagentId: params.subagentId,
+    chatModelOptions: params.chatModelOptions,
+    embeddingModelOptions: params.embeddingModelOptions,
+    metadata: params.metadata,
+    redis: params.redis,
+    queueKeyPrefix: params.queueKeyPrefix,
+    maxHistoryMessages: params.maxHistoryMessages,
+  };
 }

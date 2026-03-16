@@ -10,7 +10,7 @@ let sequence = 0;
  * Returns a new sortable unique ID as a string.
  * Safe for use as BullMQ job IDs (no colons).
  */
-export function nextSnowflakeId(): string {
+export function snowflake(): string {
   const now = Date.now() - EPOCH;
   const id = (BigInt(now) << 22n) | (BigInt(sequence++) & 0xfffn);
   if (sequence >= 4096) sequence = 0;

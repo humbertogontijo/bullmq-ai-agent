@@ -41,7 +41,7 @@ export class IngestWorker {
         const inferredSchema = inferMetadataSchema(splits);
         const store = await this.vectorStoreProvider.getVectorStore(`${agentId}-rag`, this.embeddingModelOptions, inferredSchema);
         await store.addDocuments(splits, inferredSchema);
-        return { ingested: documents.length };
+        return { documents: documents.length, chunks: splits.length };
       },
       { ...this.options }
     );

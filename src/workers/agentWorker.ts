@@ -1,113 +1,166 @@
-import { mapStoredMessagesToChatMessages, SystemMessage } from "@langchain/core/messages";
+import { SystemMessage } from "@langchain/core/messages";
 import { Job, Worker, WorkerOptions } from "bullmq";
 import type { CompiledGraph } from "../agent/compile.js";
-import type { AgentWorkerLogger, ModelOptions } from "../options.js";
-import { QUEUE_NAMES, RunContext } from "../options.js";
-import type { AgentJobData, AgentJobResult, AgentResumeData, AgentRunData, HumanInterruptPayload } from "../queues/types.js";
-import { getLastAIMessage } from "../utils/message.js";
-import type { ResumeWorker } from "./resumeWorker.js";
+import { parseTimestampFromJobId, serializeAgentState } from "../agent/middlewares/history.js";
+import { getLastJobAndReturnvalueScript } from "../commands/index.js";
+import type { AgentWorkerLogger, ModelOptions, RedisLike } from "../options.js";
+import { buildRunContext, QUEUE_NAMES } from "../options.js";
+import { buildJobIdPrefix, buildThreadJobsKey } from "../queues/queueKeys.js";
+import type {
+  AgentJobData,
+  AgentJobResult,
+  AgentResumeToolData,
+  AgentRunData,
+  StoredAgentState,
+  StoredToolMessage,
+} from "../queues/types.js";
+import { getLastRequestHumanApprovalToolCall } from "../utils/message.js";
+import { mapStoredMessagesToChatMessages } from "../utils/messageMapping.js";
 
 export interface AgentWorkerParams {
   compiledGraph: CompiledGraph;
-  resumeWorker: ResumeWorker;
+  /** Redis client (same as queue connection); used to load thread history via Lua script. */
+  redis: RedisLike;
+  /** BullMQ queue key prefix (e.g. "bull"); used for thread history key pattern. */
+  queueKeyPrefix: string;
   /** Default chat model; merged with getAgentConfig(agentId) per run (agent config overrides). */
   chatModelOptions: ModelOptions;
   embeddingModelOptions: ModelOptions;
   logger: AgentWorkerLogger;
+  /** When set, passed to getPreviousReturnvalues Lua as max number of previous jobs to load. */
+  maxHistoryMessages?: number;
 }
 
 export class AgentWorker {
   private readonly compiledGraph: CompiledGraph;
-  private readonly resumeWorker: ResumeWorker;
+  private readonly redis: RedisLike;
+  private readonly queueKeyPrefix: string;
   private readonly chatModelOptions: ModelOptions;
   private readonly embeddingModelOptions: ModelOptions;
   private readonly logger: AgentWorkerLogger;
+  private readonly maxHistoryMessages: number | undefined;
   private readonly options: WorkerOptions;
   private _started = false;
   private worker: Worker<AgentJobData, AgentJobResult> | null = null;
 
   constructor(params: AgentWorkerParams, options: WorkerOptions) {
     this.compiledGraph = params.compiledGraph;
-    this.resumeWorker = params.resumeWorker;
+    this.redis = params.redis;
+    this.queueKeyPrefix = params.queueKeyPrefix;
     this.chatModelOptions = params.chatModelOptions;
     this.embeddingModelOptions = params.embeddingModelOptions;
     this.logger = params.logger;
+    this.maxHistoryMessages = params.maxHistoryMessages;
     this.options = options;
   }
 
-  /** Process a single agent job (run or resume). Uses getRunnable(subagentId, chatModelOptions) for main or subagent. */
+  /** Process a single agent job (run or resumeTool). History is loaded by history middleware for run; resumeTool uses last job state. */
   async processJob(job: Job<AgentJobData, AgentJobResult>): Promise<AgentJobResult> {
     const data = job.data;
     const threadId = data.threadId;
     const agentId = data.agentId;
-    const configurable: RunContext = { thread_id: threadId, agentId, job, embeddingModelOptions: this.embeddingModelOptions, metadata: data.metadata };
+    const subagentId = data.subagentId;
 
-    if (job.name === "run") {
-      const runData = job.data as AgentRunData;
-      let messages = mapStoredMessagesToChatMessages(runData.input?.messages ?? []);
-      const systemParts: InstanceType<typeof SystemMessage>[] = [];
-      if (this.compiledGraph.getSkillsPrompt) {
-        systemParts.push(new SystemMessage(this.compiledGraph.getSkillsPrompt()));
-      }
-      let effectiveChatModelOptions: ModelOptions = { ...this.chatModelOptions };
-      if (this.compiledGraph.getAgentConfig) {
-        const config = await this.compiledGraph.getAgentConfig(agentId);
-        if (config?.systemPrompt) {
-          const fields = Array.isArray(config.systemPrompt) ? config.systemPrompt : [config.systemPrompt];
-          systemParts.push(...fields.map((s) => new SystemMessage(s)));
-        }
-        if (config?.model || config?.temperature != null || config?.maxTokens != null) {
-          effectiveChatModelOptions = {
-            ...this.chatModelOptions,
-            ...config.model,
-            temperature: config.temperature ?? config.model?.temperature ?? this.chatModelOptions.temperature,
-            maxTokens: config.maxTokens ?? config.model?.maxTokens ?? this.chatModelOptions.maxTokens,
-          } as ModelOptions;
-        }
-      }
-      if (systemParts.length) {
-        messages = [...systemParts, ...messages];
-      }
-      const chatModelOptions = effectiveChatModelOptions;
-      const subagentId = runData.subagentId;
-      const runnable = await this.compiledGraph.getRunnable(subagentId, chatModelOptions);
-      const stream = await runnable.stream(
-        { messages },
-        { configurable: { ...configurable, subagentId, chatModelOptions } }
-      );
-      let state: Awaited<ReturnType<typeof runnable.invoke>> | undefined;
-      for await (const chunk of stream) {
-        state = chunk;
-      }
-      if (state == null) {
-        return { status: "completed" };
-      }
-      const [interrupt] = state["__interrupt__"] ?? [];
-      if (interrupt) {
-        const interruptPayload = interrupt.value;
-        return {
-          status: "interrupted",
-          interruptPayload,
-        };
-      }
-      const lastAIMessageContent = getLastAIMessage(state.messages ?? [])?.content;
-      return { status: "completed", lastMessage: lastAIMessageContent ? JSON.stringify(lastAIMessageContent) : undefined };
+    const systemParts: InstanceType<typeof SystemMessage>[] = [];
+    if (this.compiledGraph.getSkillsPrompt) {
+      systemParts.push(new SystemMessage(this.compiledGraph.getSkillsPrompt()));
     }
 
-    if (job.name === "resume") {
-      const resumeData = job.data as AgentResumeData;
-      let chatModelOptions: ModelOptions = { ...this.chatModelOptions };
-      if (this.compiledGraph.getAgentConfig) {
-        const config = await this.compiledGraph.getAgentConfig(agentId);
-        if (config?.model) {
-          chatModelOptions = { ...this.chatModelOptions, ...config.model } as ModelOptions;
-        }
+    let effectiveChatModelOptions: ModelOptions = { ...this.chatModelOptions };
+    if (this.compiledGraph.getAgentConfig) {
+      const config = await this.compiledGraph.getAgentConfig(agentId);
+      if (config?.systemPrompt) {
+        const fields = Array.isArray(config.systemPrompt) ? config.systemPrompt : [config.systemPrompt];
+        systemParts.push(...fields.map((s) => new SystemMessage(s)));
       }
-      const subagentId = resumeData.subagentId;
-      return this.resumeWorker.runResume(configurable, resumeData.result, subagentId, chatModelOptions);
+      if (config?.model || config?.temperature != null || config?.maxTokens != null) {
+        effectiveChatModelOptions = {
+          ...this.chatModelOptions,
+          ...config.model,
+          temperature: config.temperature ?? config.model?.temperature ?? this.chatModelOptions.temperature,
+          maxTokens: config.maxTokens ?? config.model?.maxTokens ?? this.chatModelOptions.maxTokens,
+        } as ModelOptions;
+      }
+    }
+    const chatModelOptions = effectiveChatModelOptions;
+
+    const configurable = buildRunContext({
+      job,
+      agentId,
+      thread_id: threadId,
+      chatModelOptions,
+      embeddingModelOptions: this.embeddingModelOptions,
+      metadata: data.metadata,
+      redis: this.redis,
+      queueKeyPrefix: this.queueKeyPrefix,
+      maxHistoryMessages: this.maxHistoryMessages,
+    });
+
+    let inputStored: StoredAgentState["messages"];
+    if (job.name === "resumeTool") {
+      const resumeData = data as AgentResumeToolData;
+      const threadJobsKey = buildThreadJobsKey(this.queueKeyPrefix, QUEUE_NAMES.AGENT, threadId);
+      const jobIdPrefix = buildJobIdPrefix(this.queueKeyPrefix, QUEUE_NAMES.AGENT);
+      const raw = (await this.redis.eval(
+        getLastJobAndReturnvalueScript,
+        1,
+        threadJobsKey,
+        jobIdPrefix
+      )) as [string, string] | [];
+      if (!raw || raw.length < 2) {
+        throw new Error(`No previous job found for thread ${threadId}; cannot resumeTool.`);
+      }
+      const [, returnvalueStr] = raw;
+      let lastState: AgentJobResult;
+      try {
+        lastState = JSON.parse(returnvalueStr || "{}") as AgentJobResult;
+      } catch {
+        throw new Error(`Invalid return value from previous job for thread ${threadId}.`);
+      }
+      const lastMessages = lastState?.messages ?? [];
+      const toolCall = getLastRequestHumanApprovalToolCall(lastMessages);
+      if (!toolCall?.id) {
+        throw new Error(`Last job for thread ${threadId} has no pending tool calls.`);
+      }
+      const toolMessage: StoredToolMessage = {
+        type: "tool",
+        data: {
+          content: resumeData.content,
+          tool_call_id: toolCall.id,
+          name: toolCall.name,
+        },
+      };
+      inputStored = [toolMessage];
+    } else {
+      const runData = data as AgentRunData;
+      inputStored = runData.input?.messages ?? [];
     }
 
-    return { status: "completed" };
+    let messages = mapStoredMessagesToChatMessages(inputStored);
+    if (systemParts.length) {
+      messages = [...systemParts, ...messages];
+    }
+    const runnable = await this.compiledGraph.getRunnable(subagentId, chatModelOptions);
+    const streamConfig = {
+      configurable,
+      // Middleware hooks receive config.context as runtime.context (LangChain does not pass configurable to runtime).
+      context: configurable,
+    };
+    const state = await runnable.invoke({ messages }, streamConfig);
+    if (!state) {
+      return { messages: [] };
+    }
+
+    // Register this job in the thread-jobs set so resumeTool and history ccan use it. Skip for ephemeral subagents (suggestions, reply-draft).
+    const isEphemeral = data.subagentId && this.compiledGraph.isEphemeralSubagent?.(data.subagentId);
+    if (!isEphemeral) {
+      const threadJobsKey = buildThreadJobsKey(this.queueKeyPrefix, QUEUE_NAMES.AGENT, threadId);
+      const ts = parseTimestampFromJobId(String(job.id));
+      const score = Number.isNaN(ts) ? Date.now() : ts;
+      await this.redis.zadd(threadJobsKey, score, String(job.id));
+    }
+
+    return serializeAgentState(state);
   }
 
   start() {
@@ -118,8 +171,12 @@ export class AgentWorker {
       { ...this.options }
     );
 
-    this.worker.on("completed", (job) => {
+    this.worker.on("completed", async (job) => {
       this.logger.debug(`[agent] Job ${job.id} (${job.name}) completed`);
+      const isEphemeral = job.data.subagentId && this.compiledGraph.isEphemeralSubagent?.(job.data.subagentId);
+      if (isEphemeral) {
+        await job.remove();
+      }
     });
     this.worker.on("failed", (job, err) => {
       this.logger.error(`[agent] Job ${job?.id} (${job?.name}) failed`, err);

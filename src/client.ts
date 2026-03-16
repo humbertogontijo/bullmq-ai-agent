@@ -1,11 +1,11 @@
-import type { StoredMessage } from "@langchain/core/messages";
 import type { Queue, QueueOptions } from "bullmq";
 import { QueueEvents } from "bullmq";
 import { QUEUE_NAMES } from "./options.js";
+import { snowflake } from "./utils/snowflake.js";
 import { createAgentQueue } from "./queues/agentQueue.js";
 import { createIngestQueue } from "./queues/ingestQueue.js";
 import { createSearchQueue } from "./queues/searchQueue.js";
-import type { AgentJobData, AgentJobResult, IngestJobData, IngestJobResult, InterruptPayload, ResumeData, SearchJobData, SearchJobResult } from "./queues/types.js";
+import type { AgentJobData, AgentJobResult, IngestJobData, IngestJobResult, SearchJobData, SearchJobResult, StoredMessage } from "./queues/types.js";
 
 export type MessageRole = "user" | "assistant" | "system";
 
@@ -18,21 +18,41 @@ export interface JobProgress {
 export interface RunOptions {
   /** Subagent name; when set, that subagent runs directly (must match a subagent name from BullMQAgentWorker options). */
   subagentId?: string;
-  /** Initial messages (e.g. [{ role: "user", content: "Hello" }]). */
+  /** Initial messages (StoredMessage[], e.g. [{ type: "human", data: { content: "Hello" } }]). */
   messages: StoredMessage[];
   /** Called when the worker reports progress (e.g. graph node stage). Uses BullMQ job progress. */
   onProgress?: (progress: JobProgress) => void;
   /** Optional run-level metadata (e.g. owner, tenant). Passed to configurable so tools and getAgentConfig can read it. */
   metadata?: Record<string, unknown>;
+  /** Time-to-live (ms) when awaiting the result. Default 120_000. */
+  ttl?: number;
 }
 
 export interface ResumeOptions {
-  /** Pass when resuming so the same runnable (main or subagent) is used. From interruptPayload. */
+  /** New messages to append (e.g. human reply after interrupt). History is loaded and prepended by the worker. */
+  messages: StoredMessage[];
+  /** Pass when resuming so the same runnable (main or subagent) is used. */
   subagentId?: string;
   /** Called when the worker reports progress. */
   onProgress?: (progress: JobProgress) => void;
   /** Optional run-level metadata. Passed to configurable so tools and getAgentConfig can read it. */
   metadata?: Record<string, unknown>;
+  /** Time-to-live (ms) when awaiting the result. Default 120_000. */
+  ttl?: number;
+}
+
+/** Options for resumeTool: send only content; worker builds tool message from last job's AI tool_call_id. */
+export interface ResumeToolOptions {
+  /** Human response content for the request_human_approval tool. */
+  content: string;
+  /** Pass when resuming so the same runnable (main or subagent) is used. */
+  subagentId?: string;
+  /** Called when the worker reports progress. */
+  onProgress?: (progress: JobProgress) => void;
+  /** Optional run-level metadata. */
+  metadata?: Record<string, unknown>;
+  /** Time-to-live (ms) when awaiting the result. Default 120_000. */
+  ttl?: number;
 }
 
 export interface IngestDocument {
@@ -45,6 +65,8 @@ export interface IngestOptions {
   /** Agent id for which to ingest the document. */
   agentId: string;
   source: IngestDocument;
+  /** Time-to-live (ms) when awaiting the result. Default 120_000. */
+  ttl?: number;
 }
 
 const defaultWaitTtl = 120_000; // 2 minutes
@@ -55,16 +77,19 @@ export interface ClientResultMeta {
 }
 
 /**
- * Fallback result when the client result has no jobId or the job was not found.
- * Use this interface to narrow await results: check status === "no_job" | "job_not_found".
+ * Thrown when awaiting a ClientResult and the job ID is missing or the job was not found.
+ * Catch this error to handle "no_job" or "job_not_found" cases.
  */
-export interface AwaitableResultFallback {
-  status: "no_job" | "job_not_found";
-  message?: string;
-}
+export class ClientResultError extends Error {
+  readonly status: "no_job" | "job_not_found";
 
-/** Resolved type when awaiting a ClientResult: the job result T or a fallback when jobId is missing or job not found. */
-export type ClientResultResolved<T> = T | AwaitableResultFallback;
+  constructor(status: "no_job" | "job_not_found", message: string) {
+    super(message);
+    this.name = "ClientResultError";
+    this.status = status;
+    Object.setPrototypeOf(this, ClientResultError.prototype);
+  }
+}
 
 /** Queue-like type used by ClientResult to get a job and wait for it. */
 export interface ClientResultQueueLike {
@@ -73,62 +98,96 @@ export interface ClientResultQueueLike {
 
 /**
  * Result for run/resume/ingest. Holds queue and queueEvents and handles waiting internally.
- * Use .jobId without awaiting. Call .wait(ttl?) to get a Promise for the job result.
- * When jobId is missing or the job is not found, the promise resolves to
- * AwaitableResultFallback (status "no_job" or "job_not_found") so you can handle it explicitly.
+ * Use .jobId and await .promise for the job result. TTL is fixed at creation (pass ttl in run/resume/ingest/search options).
+ * When jobId is missing or the job is not found, the promise rejects with ClientResultError.
+ * When onProgress is provided, ClientResult owns the progress subscription and unsubscribes when the promise settles.
  */
 export class ClientResult<T> {
   readonly jobId: string | undefined;
   private readonly _queue: ClientResultQueueLike;
   private readonly _queueEvents: QueueEvents;
-  private readonly _defaultTtl: number;
+  private readonly _ttl: number;
+  private _unsubscribeProgress: (() => void) | undefined;
+  promise: Promise<T>;
 
   constructor(
     queue: ClientResultQueueLike,
     queueEvents: QueueEvents,
     meta: ClientResultMeta,
-    defaultTtl: number = defaultWaitTtl
+    ttl: number = defaultWaitTtl,
+    onProgress?: (progress: JobProgress) => void
   ) {
     const safeMeta = meta ?? { jobId: undefined };
     this._queue = queue;
     this._queueEvents = queueEvents;
-    this._defaultTtl = defaultTtl;
+    this._ttl = ttl;
     this.jobId = safeMeta.jobId;
+    this._unsubscribeProgress = undefined;
+    if (this.jobId && onProgress) {
+      this._unsubscribeProgress = this._subscribeProgress(this.jobId, onProgress);
+    }
+    this.promise = this._wait();
   }
 
-  private async _wait(ttl: number): Promise<ClientResultResolved<T>> {
-    if (!this.jobId) {
-      return { status: "no_job", message: "Job ID is missing" };
-    }
-    const job = await this._queue.getJob(this.jobId);
-    if (!job) {
-      return { status: "job_not_found", message: `Job ${this.jobId} not found` };
-    }
-    return (await job.waitUntilFinished(this._queueEvents, ttl)) as T;
+  private _subscribeProgress(jobId: string, onProgress: (progress: JobProgress) => void): () => void {
+    const progressHandler = (args: { jobId: string; data: unknown }, _id?: string) => {
+      if (args.jobId === jobId) onProgress(args.data as JobProgress);
+    };
+    const remove = () => {
+      this._queueEvents.off("progress", progressHandler);
+      this._queueEvents.off("completed", completedHandler);
+      this._queueEvents.off("failed", failedHandler);
+    };
+    const completedHandler = ({ jobId: id }: { jobId: string }) => {
+      if (id === jobId) remove();
+    };
+    const failedHandler = ({ jobId: id }: { jobId: string }) => {
+      if (id === jobId) remove();
+    };
+    this._queueEvents.on("progress", progressHandler);
+    this._queueEvents.on("completed", completedHandler);
+    this._queueEvents.on("failed", failedHandler);
+    return remove;
   }
 
-  /** Wait for the job to complete with optional custom TTL (ms). Resolves to T or AwaitableResultFallback. */
-  wait(ttl?: number): Promise<ClientResultResolved<T>> {
-    return this._wait(ttl ?? this._defaultTtl);
+  private async _wait(): Promise<T> {
+    try {
+      if (!this.jobId) {
+        throw new ClientResultError("no_job", "Job ID is missing");
+      }
+      const job = await this._queue.getJob(this.jobId);
+      if (!job) {
+        throw new ClientResultError("job_not_found", `Job ${this.jobId} not found`);
+      }
+      return (await job.waitUntilFinished(this._queueEvents, this._ttl)) as T;
+    } finally {
+      this._unsubscribeProgress?.();
+      this._unsubscribeProgress = undefined;
+    }
   }
 }
 
-/** Result of run(); use .jobId and .wait(ttl?) for AgentJobResult or fallback. */
+/** Result of run(); use .jobId and await .promise for AgentJobResult (throws ClientResultError if no job or not found). */
 export type RunResult = ClientResult<AgentJobResult>;
 
-/** Result of resume(); await for AgentJobResult or fallback; use .jobId. */
+/** Result of resume() or resumeTool(); use .jobId and await .promise (throws ClientResultError if no job or not found). */
 export type ResumeResult = ClientResult<AgentJobResult>;
 
-/** Result of ingest(); await for IngestJobResult or fallback; use .jobId. */
+/** Result of ingest(); use .jobId and await .promise (throws ClientResultError if no job or not found). */
 export type IngestResult = ClientResult<IngestJobResult>;
 
-/** Result of searchKnowledge(); await for SearchJobResult or fallback; use .jobId. */
+/** Result of searchKnowledge(); use .jobId and await .promise (throws ClientResultError if no job or not found). */
 export type SearchResult = ClientResult<SearchJobResult>;
 
 export interface SearchKnowledgeOptions {
   /** Number of results to return (default 5). */
   k?: number;
+  /** Time-to-live (ms) when awaiting the result. Default 120_000. */
+  ttl?: number;
 }
+
+/** Client options: QueueOptions. Thread index (for history) is maintained by the worker when it processes jobs. */
+export interface BullMQAgentClientOptions extends QueueOptions { }
 
 /**
  * Client for invoking the BullMQ agent: start runs, resume after human-in-the-loop, and ingest documents for RAG.
@@ -136,14 +195,14 @@ export interface SearchKnowledgeOptions {
  */
 export class BullMQAgentClient {
   private readonly options: QueueOptions;
-  private readonly agentQueue: Queue<AgentJobData>;
+  private readonly agentQueue: Queue<AgentJobData, AgentJobResult>;
   private readonly ingestQueue: Queue<IngestJobData>;
   private readonly searchQueue: Queue<SearchJobData>;
   private readonly agentQueueEvents: QueueEvents;
   private readonly ingestQueueEvents: QueueEvents;
   private readonly searchQueueEvents: QueueEvents;
 
-  constructor(options: QueueOptions) {
+  constructor(options: BullMQAgentClientOptions) {
     this.options = options;
     this.agentQueue = createAgentQueue({ ...this.options });
     this.ingestQueue = createIngestQueue({ ...this.options });
@@ -168,9 +227,8 @@ export class BullMQAgentClient {
   }
 
   /**
-   * Start a new agent run. Returns ClientResult<AgentJobResult>: await it for the job result (default TTL),
-   * or use .jobId / .agentId / .threadId and optionally .wait(ttl) for custom TTL.
-   * When jobId is missing or job not found, the awaited value is AwaitableResultFallback.
+   * Start a new agent run. Returns ClientResult<AgentJobResult>: await it for the job result.
+   * Pass ttl in options to set wait timeout (ms). When jobId is missing or job not found, the promise rejects with ClientResultError.
    */
   async run(
     agentId: string,
@@ -179,59 +237,85 @@ export class BullMQAgentClient {
   ): Promise<RunResult> {
     const agentQueue = this.agentQueue;
     const messages = options.messages;
-    const job = await agentQueue.add("run", {
-      agentId: agentId,
-      threadId: threadId,
-      subagentId: options.subagentId,
-      metadata: options.metadata,
-      input: { messages },
-    });
-    if (options.onProgress && job.id) {
-      this.subscribeToJobProgress(job.id, options.onProgress);
-    }
+    const jobId = `${threadId}/${snowflake()}`;
+    const job = await agentQueue.add(
+      "run",
+      {
+        agentId: agentId,
+        threadId: threadId,
+        subagentId: options.subagentId,
+        metadata: options.metadata,
+        input: { messages },
+      },
+      { jobId }
+    );
+    const resolvedJobId = job.id ?? jobId;
     return new ClientResult<AgentJobResult>(
       this.agentQueue,
       this.agentQueueEvents,
-      { jobId: job.id },
-      defaultWaitTtl
+      { jobId: resolvedJobId },
+      options.ttl ?? defaultWaitTtl,
+      options.onProgress
     );
   }
 
   /**
-   * Resume a run after a human-in-the-loop interrupt. Returns ClientResult<AgentJobResult>: await for
-   * the job result or use .jobId and .wait(ttl?) for custom TTL.
-   * When jobId is missing or job not found, the awaited value is AwaitableResultFallback.
+   * Resume a run after a human-in-the-loop interrupt. Same as run but uses only the provided messages
+   * (no history from previous jobs). Returns ClientResult<AgentJobResult>: await for the job result.
+   * Prefer resumeTool() when you only have the human response content; the worker then builds the tool message.
    */
   async resume(
     agentId: string,
     threadId: string,
-    result: ResumeData,
-    options: ResumeOptions = {}
+    options: ResumeOptions
   ): Promise<ResumeResult> {
-    const job = await this.agentQueue.add("resume", {
-      agentId,
-      threadId,
-      result,
+    return this.run(agentId, threadId, {
+      messages: options.messages,
       subagentId: options.subagentId,
       metadata: options.metadata,
+      onProgress: options.onProgress,
+      ttl: options.ttl,
     });
-    if (options.onProgress && job.id) {
-      this.subscribeToJobProgress(job.id, options.onProgress);
-    }
+  }
+
+  /**
+   * Resume after human-in-the-loop by sending only the human response content. The worker fetches the last
+   * executed job for the thread, builds the tool message with the last AI message's tool_call_id, and runs the graph.
+   * Returns ClientResult<AgentJobResult>. Requires a previous run for this thread (job registered in thread-jobs set).
+   */
+  async resumeTool(
+    agentId: string,
+    threadId: string,
+    options: ResumeToolOptions
+  ): Promise<ResumeResult> {
+    const jobId = `${threadId}/${snowflake()}`;
+    const job = await this.agentQueue.add(
+      "resumeTool",
+      {
+        agentId,
+        threadId,
+        content: options.content,
+        subagentId: options.subagentId,
+        metadata: options.metadata,
+      },
+      { jobId }
+    );
+    const resolvedJobId = job.id ?? jobId;
     return new ClientResult<AgentJobResult>(
       this.agentQueue,
       this.agentQueueEvents,
-      { jobId: job.id },
-      defaultWaitTtl
+      { jobId: resolvedJobId },
+      options.ttl ?? defaultWaitTtl,
+      options.onProgress
     );
   }
 
   /**
    * Ingest documents into the RAG vector store for an agent. Returns ClientResult<IngestJobResult>:
-   * await for the ingest result or use .jobId and .wait(ttl?) for custom TTL.
-   * When jobId is missing or job not found, the awaited value is AwaitableResultFallback.
+   * await for the ingest result. Pass ttl in options to set wait timeout (ms).
+   * When jobId is missing or job not found, the promise rejects with ClientResultError.
    */
-  async ingest({ agentId, source }: IngestOptions): Promise<IngestResult> {
+  async ingest({ agentId, source, ttl }: IngestOptions): Promise<IngestResult> {
     const job = await this.ingestQueue.add("ingest", {
       agentId,
       source,
@@ -240,21 +324,21 @@ export class BullMQAgentClient {
       this.ingestQueue,
       this.ingestQueueEvents,
       { jobId: job.id },
-      defaultWaitTtl
+      ttl ?? defaultWaitTtl
     );
   }
 
   /**
    * Run similarity search over the RAG vector store for an agent. Returns ClientResult<SearchJobResult>:
-   * await for the search result (results and count) or use .jobId and .wait(ttl?) for custom TTL.
-   * When jobId is missing or job not found, the awaited value is AwaitableResultFallback.
+   * await for the search result (results and count). Pass ttl in options to set wait timeout (ms).
+   * When jobId is missing or job not found, the promise rejects with ClientResultError.
    */
   async searchKnowledge(
     agentId: string,
     query: string,
     options: SearchKnowledgeOptions = {}
   ): Promise<SearchResult> {
-    const { k = 5 } = options;
+    const { k = 5, ttl } = options;
     const job = await this.searchQueue.add("search", {
       agentId,
       query,
@@ -264,7 +348,7 @@ export class BullMQAgentClient {
       this.searchQueue,
       this.searchQueueEvents,
       { jobId: job.id },
-      defaultWaitTtl
+      ttl ?? defaultWaitTtl
     );
   }
 
@@ -273,29 +357,5 @@ export class BullMQAgentClient {
    */
   getAgentJob(jobId: string) {
     return this.agentQueue.getJob(jobId);
-  }
-
-  /**
-   * Subscribe to progress events for a job. Returns unsubscribe. Listener is auto-removed when job completes or fails.
-   */
-  private subscribeToJobProgress(jobId: string, onProgress: (progress: JobProgress) => void): () => void {
-    const progressHandler = (args: { jobId: string; data: unknown }, _id?: string) => {
-      if (args.jobId === jobId) onProgress(args.data as JobProgress);
-    };
-    const remove = () => {
-      this.agentQueueEvents.off("progress", progressHandler);
-      this.agentQueueEvents.off("completed", completedHandler);
-      this.agentQueueEvents.off("failed", failedHandler);
-    };
-    const completedHandler = ({ jobId: id }: { jobId: string }) => {
-      if (id === jobId) remove();
-    };
-    const failedHandler = ({ jobId: id }: { jobId: string }) => {
-      if (id === jobId) remove();
-    };
-    this.agentQueueEvents.on("progress", progressHandler);
-    this.agentQueueEvents.on("completed", completedHandler);
-    this.agentQueueEvents.on("failed", failedHandler);
-    return remove;
   }
 }

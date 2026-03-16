@@ -19,15 +19,12 @@ import {
 import type { CreateDeepAgentParams, SubAgent, CompiledSubAgent } from "deepagents";
 import {
   createSubAgentMiddleware,
-  createSummarizationMiddleware,
   createPatchToolCallsMiddleware,
   StateBackend,
   createSkillsMiddleware,
   createMemoryMiddleware,
 } from "deepagents";
-
-const BASE_PROMPT =
-  "In order to complete the objective that the user asks of you, you have access to a number of standard tools.";
+import { BASE_PROMPT } from "./prompts.js";
 
 /** Subagent type: either a spec (SubAgent) or a pre-compiled runnable (CompiledSubAgent). */
 type SubAgentOrCompiled = SubAgent | CompiledSubAgent;
@@ -65,6 +62,7 @@ export function createDeepAgent(
   params: CreateDeepAgentParams = {}
 ): ReturnType<typeof createAgent> {
   const {
+    // Default model string; only used if createDeepAgent is called without model. The orchestrator always passes an initialized chat model from initChatModel(provider:model, options).
     model = "claude-sonnet-4-5-20250929",
     tools = [],
     systemPrompt,
@@ -72,7 +70,6 @@ export function createDeepAgent(
     subagents = [],
     responseFormat,
     contextSchema,
-    checkpointer,
     store,
     backend,
     interruptOn,
@@ -124,10 +121,6 @@ export function createDeepAgent(
 
   const subagentMiddlewareNoFs = [
     todoListMiddleware(),
-    createSummarizationMiddleware({
-      model,
-      backend: backendFactory,
-    }),
     anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
     createPatchToolCallsMiddleware(),
   ];
@@ -153,10 +146,6 @@ export function createDeepAgent(
         subagents: processedSubagents,
         generalPurposeAgent: true,
       }),
-      createSummarizationMiddleware({
-        model,
-        backend: backendFactory,
-      }),
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
       createPatchToolCallsMiddleware(),
       ...skillsMiddlewareArray,
@@ -166,7 +155,6 @@ export function createDeepAgent(
     ],
     ...(responseFormat != null && { responseFormat }),
     contextSchema,
-    checkpointer,
     store,
     name,
   }).withConfig({ recursionLimit: 10_000 });

@@ -1,12 +1,13 @@
 import { tool } from "@langchain/core/tools";
 import type { Skill } from "../../options.js";
+import { getLoadSkillToolDescription, LOAD_SKILL_SKILL_NAME_DESCRIPTION } from "../prompts.js";
 
 const schema = {
   type: "object" as const,
   properties: {
     skillName: {
       type: "string" as const,
-      description: "The name of the skill to load (must match a skill from the configured skills list).",
+      description: LOAD_SKILL_SKILL_NAME_DESCRIPTION,
     },
   },
   required: ["skillName"],
@@ -29,7 +30,7 @@ export function createLoadSkillTool(skills: Skill[]) {
     },
     {
       name: "load_skill",
-      description: `Load the full content of a skill into context. Use when you need detailed information about a specific area. Available skills: ${skills.map((s) => s.name).join(", ")}.`,
+      description: getLoadSkillToolDescription(skills.map((s) => s.name)),
       schema,
     }
   );
