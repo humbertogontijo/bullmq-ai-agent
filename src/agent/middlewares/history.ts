@@ -124,20 +124,7 @@ export function createHistoryMiddleware() {
         messages: [...history, ...messages],
       });
     },
-    afterAgent: (state) => {
-      const historyMessages = state?.historyMessages ?? [];
-      const historyCount = historyMessages.length;
-      const messages = state?.messages ?? [];
-      if (historyCount > 0 && messages.length >= historyCount) {
-        const delta = messages.slice(historyCount);
-        return {
-          messages: [
-            new RemoveMessage({ id: REMOVE_ALL_MESSAGES }),
-            ...delta,
-          ],
-          historyMessages: [],
-        };
-      }
+    afterAgent: () => {
       return { historyMessages: [] };
     },
   });
