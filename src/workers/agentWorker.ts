@@ -16,6 +16,7 @@ import type {
 } from "../queues/types.js";
 import { getLastRequestHumanApprovalToolCall } from "../utils/message.js";
 import { mapStoredMessagesToChatMessages } from "../utils/messageMapping.js";
+import { AgentState } from "../agent/state.js";
 
 export interface AgentWorkerParams {
   compiledGraph: CompiledGraph;
@@ -146,7 +147,7 @@ export class AgentWorker {
       // Middleware hooks receive config.context as runtime.context (LangChain does not pass configurable to runtime).
       context: configurable,
     };
-    const state = await runnable.invoke({ messages }, streamConfig);
+    const state: AgentState = await runnable.invoke({ messages }, streamConfig);
     if (!state) {
       return { messages: [] };
     }
@@ -160,7 +161,12 @@ export class AgentWorker {
       await this.redis.zadd(threadJobsKey, score, String(job.id));
     }
 
-    return serializeAgentState(state);
+    return serializeAgentState({
+      // Exclude system messages from the stored state so they are not persisted in job history.
+      messages: (state.messages ?? []).filter(
+        (m) => !SystemMessage.isInstance(m)
+      )
+    });
   }
 
   start() {

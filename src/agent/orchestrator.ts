@@ -58,7 +58,7 @@ async function createRunnable(
     });
     const runnable = createDeepAgent({
       model: chaModel,
-      tools: subagent.tools,
+      tools: [...tools, ...(subagent.tools ?? [])],
       systemPrompt: new SystemMessage(subagent.systemPrompt),
       middleware: [createProgressMiddleware(), createHistoryMiddleware(), createSummarizationMiddleware()]
     });
