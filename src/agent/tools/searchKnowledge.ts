@@ -46,7 +46,7 @@ export function createSearchKnowledgeTool(
       const limit = k ?? 5;
       if (!embeddingModelOptions) throw new Error("embeddingModelOptions required for search_knowledge (pass in run options)");
       try {
-        const store = await vectorStoreProvider.getVectorStore(`${agentId}-rag`, embeddingModelOptions);
+        const store = await vectorStoreProvider.getVectorStore(agentId, embeddingModelOptions);
         const docs = await store.similaritySearch(query, limit);
         const results = docs.map((d) => ({
           content: d.pageContent,

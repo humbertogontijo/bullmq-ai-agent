@@ -39,7 +39,7 @@ export class IngestWorker {
         const documents = await loadDocumentsFromSource(source);
         const splits = await splitDocuments(documents);
         const inferredSchema = inferMetadataSchema(splits);
-        const store = await this.vectorStoreProvider.getVectorStore(`${agentId}-rag`, this.embeddingModelOptions, inferredSchema);
+        const store = await this.vectorStoreProvider.getVectorStore(agentId, this.embeddingModelOptions, inferredSchema);
         await store.addDocuments(splits, inferredSchema);
         return { documents: documents.length, chunks: splits.length };
       },

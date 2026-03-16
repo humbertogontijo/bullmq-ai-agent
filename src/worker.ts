@@ -118,6 +118,7 @@ export class BullMQAgentWorker {
     }
     this.vectorStoreProvider = new VectorStoreProvider({
       client: documentClient,
+      prefix: this.options.prefix,
     });
 
     const baseTools = [

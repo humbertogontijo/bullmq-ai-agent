@@ -7,6 +7,7 @@ import { getEmbeddings } from "./embeddings.js";
 
 export interface VectorStoreProviderOptions {
   client: Redis | Cluster;
+  prefix?: string;
 }
 
 const DEFAULT_RAG_METADATA_SCHEMA: MetadataFieldSchema[] = [
@@ -14,14 +15,16 @@ const DEFAULT_RAG_METADATA_SCHEMA: MetadataFieldSchema[] = [
 ];
 
 /**
- * Provides RedisVectorStore instances (ioredis-backed) keyed by index name (e.g. agentId-rag).
+ * Provides RedisVectorStore instances (ioredis-backed) keyed by index name (e.g. agentId).
  * Caller passes embeddingModelOptions (including apiKey); library does not read process.env.
  */
 export class VectorStoreProvider {
   readonly client: Redis | Cluster;
+  readonly prefix: string | undefined;
 
   constructor(options: VectorStoreProviderOptions) {
     this.client = options.client;
+    this.prefix = options.prefix;
   }
 
   /** Create a RedisVectorStore for an agent. embeddingModelOptions (with apiKey) must be passed by the caller (e.g. CLI). */
@@ -39,6 +42,7 @@ export class VectorStoreProvider {
       client: this.client,
       indexName,
       customSchema: inferredSchema ?? DEFAULT_RAG_METADATA_SCHEMA,
+      keyPrefix: this.prefix,
     });
     return store;
   }

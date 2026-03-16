@@ -130,11 +130,10 @@ function buildFtCreateSchemaArgs(
  * API-compatible with LangChain VectorStore (addDocuments, similaritySearch, similaritySearchVectorWithScore).
  */
 export class RedisVectorStore extends VectorStore {
-  FilterType: FilterExpression | string = "*";
   private readonly client: Redis | Cluster;
   readonly indexName: string;
   readonly indexOptions: NonNullable<RedisVectorStoreConfig["indexOptions"]>;
-  readonly createIndexOptions: { ON?: string; PREFIX?: string; [key: string]: string | number | undefined };
+  readonly createIndexOptions: { ON?: string; };
   readonly keyPrefix: string;
   readonly contentKey: string;
   readonly metadataKey: string;
@@ -151,17 +150,15 @@ export class RedisVectorStore extends VectorStore {
       ALGORITHM: "HNSW",
       DISTANCE_METRIC: "COSINE",
     };
-    this.keyPrefix = config.keyPrefix ?? `doc:${config.indexName}:`;
+    this.keyPrefix = config.keyPrefix ? `${config.keyPrefix}:doc:${config.indexName}:` : `doc:${config.indexName}:`;
     this.contentKey = config.contentKey ?? "content";
     this.metadataKey = config.metadataKey ?? "metadata";
     this.vectorKey = config.vectorKey ?? "content_vector";
     this.filter = config.filter;
-    this.FilterType = config.filter ?? "*";
     this.ttl = config.ttl;
     this.customSchema = config.customSchema;
     this.createIndexOptions = {
       ON: "HASH",
-      PREFIX: this.keyPrefix,
       ...config.createIndexOptions,
     };
   }
@@ -193,8 +190,8 @@ export class RedisVectorStore extends VectorStore {
         const idx = i + j;
         const key = keys && keys[idx] ? keys[idx] : `${this.keyPrefix}${v4()}`;
         const doc = docsBatch[j];
-        const metadata = (doc?.metadata as Record<string, unknown>) ?? {};
-        const hash: Record<string, string | Buffer> = {
+        const metadata = doc?.metadata ?? {};
+        const hash: Record<string, string | number | Buffer> = {
           [this.vectorKey]: this.getFloat32Buffer(batch[j]),
           [this.contentKey]: doc.pageContent,
         };
@@ -202,7 +199,7 @@ export class RedisVectorStore extends VectorStore {
           for (const fieldSchema of this.customSchema) {
             const v = metadata[fieldSchema.name];
             if (v !== undefined && v !== null) {
-              hash[fieldSchema.name] = serializeMetadataField(fieldSchema, v) as string;
+              hash[fieldSchema.name] = serializeMetadataField(fieldSchema, v);
             }
           }
         }
@@ -231,7 +228,7 @@ export class RedisVectorStore extends VectorStore {
       "PARAMS",
       2,
       "vector",
-      opts.PARAMS.vector as Buffer,
+      opts.PARAMS.vector,
       "RETURN",
       opts.RETURN.length,
       ...opts.RETURN,
@@ -321,18 +318,10 @@ export class RedisVectorStore extends VectorStore {
     );
   }
 
-  async checkIndexState(): Promise<"default" | "legacy" | "none"> {
+  async checkIndexState(): Promise<"default" | "none"> {
     try {
-      const reply = await this.client.call("FT.INFO", this.indexName) as unknown[];
-      const idx = Array.isArray(reply) ? (reply as string[]).indexOf("attributes") : -1;
-      const attrs = idx >= 0 && reply[idx + 1] !== undefined ? reply[idx + 1] : [];
-      const list = Array.isArray(attrs) ? attrs : [];
-      const hasLegacy = list.some((a: unknown) => {
-        const pair = Array.isArray(a) ? a : [];
-        const idIdx = pair.indexOf("identifier");
-        return idIdx >= 0 && pair[idIdx + 1] === this.metadataKey;
-      });
-      return hasLegacy ? "legacy" : "default";
+      await this.client.call("FT.INFO", this.indexName);
+      return  "default";
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (message.includes("unknown command")) {
@@ -362,7 +351,6 @@ export class RedisVectorStore extends VectorStore {
 
     if (state !== "none") return;
 
-    const prefix = this.createIndexOptions.PREFIX ?? this.keyPrefix;
     const schemaArgs = buildFtCreateSchemaArgs(
       this.vectorKey,
       this.contentKey,
@@ -375,10 +363,10 @@ export class RedisVectorStore extends VectorStore {
       "FT.CREATE",
       this.indexName,
       "ON",
-      (this.createIndexOptions.ON as string) ?? "HASH",
+      this.createIndexOptions.ON ?? "HASH",
       "PREFIX",
       1,
-      prefix,
+      this.keyPrefix,
       "SCHEMA",
       ...schemaArgs,
     ] as const;

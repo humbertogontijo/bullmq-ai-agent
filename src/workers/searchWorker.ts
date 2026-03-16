@@ -32,13 +32,13 @@ export class SearchWorker {
       async (job) => {
         const { agentId, query, k = 5 } = job.data;
         const store = await this.vectorStoreProvider.getVectorStore(
-          `${agentId}-rag`,
+          agentId,
           this.embeddingModelOptions
         );
         const docs = await store.similaritySearch(query, k);
         const results = docs.map((d) => ({
           content: d.pageContent,
-          metadata: (d.metadata ?? {}) as Record<string, unknown>,
+          metadata: (d.metadata ?? {}),
         }));
         return { results, count: results.length };
       },
