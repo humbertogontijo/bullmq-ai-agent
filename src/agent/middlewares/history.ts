@@ -1,4 +1,4 @@
-import { RemoveMessage } from "@langchain/core/messages";
+import { RemoveMessage, SystemMessage, type BaseMessage } from "@langchain/core/messages";
 import type { Redis } from "ioredis";
 import { createMiddleware } from "langchain";
 import { z } from "zod";
@@ -81,22 +81,27 @@ export function serializeAgentState(state: AgentState): StoredAgentState {
 }
 
 /**
- * Creates an agent middleware that loads thread history in beforeAgent, injects it only
- * in wrapModelCall (so the model sees full context), and clears it in afterAgent.
- * State.messages is never merged with history, so tool/tool_calls ordering stays valid
- * and we avoid "messages with role 'tool' must be a response to a preceding message with 'tool_calls'".
- * Job return value is only new messages (delta) since state.messages is never prepended with history.
+ * Creates an agent middleware that manages thread history across jobs.
+ *
+ * - beforeAgent: loads history from Redis and stores it in graph state as historyMessages.
+ * - beforeModel: injects history into state.messages (system messages first, then history,
+ *   then current messages) so the model sees full conversation context.
+ * - afterModel: removes the injected history messages from state.messages via RemoveMessage
+ *   so they don't persist in the graph state or the job's return value.
+ *
+ * The stateSchema exposes historyMessages so downstream middlewares
+ * (e.g. SummarizationMiddleware) can read it from graph state in their beforeAgent hook.
+ *
  * Expects run context (redis, thread_id, job, queueKeyPrefix) via config.context at invoke time.
  */
 export function createHistoryMiddleware() {
   return createMiddleware({
     name: "HistoryMiddleware",
     stateSchema: z.object({
-      /** History messages from previous jobs; only injected at model call time, not merged into state.messages. */
       historyMessages: z.array(z.any()).optional(),
     }),
     contextSchema: runContextContextSchema,
-    beforeAgent: async (state, runtime) => {
+    beforeAgent: async (_state, runtime) => {
       const ctx = runtime?.context as RunContext | undefined;
       const { redis, thread_id, job, queueKeyPrefix } = ctx ?? {};
       if (!redis || !job?.id || !queueKeyPrefix || !thread_id) {
@@ -116,28 +121,24 @@ export function createHistoryMiddleware() {
       const historyMessages = mapStoredMessagesToChatMessages(stored);
       return { historyMessages };
     },
-    wrapModelCall: async (request, handler) => {
-      const history = request.state?.historyMessages ?? [];
-      const messages = request.messages ?? [];
-      return handler({
-        ...request,
-        messages: [...history, ...messages],
-      });
-    },
-    afterAgent: (state) => {
+    beforeModel: async (state) => {
       const historyMessages = state?.historyMessages ?? [];
-      const messages = state?.messages ?? [];
-      if (historyMessages.length > 0) {
-        const delta = messages.filter(message => !historyMessages.find(h => h.id != undefined && h.id === message.id));
-        return {
-          messages: [
-            new RemoveMessage({ id: REMOVE_ALL_MESSAGES }),
-            ...delta,
-          ],
-          historyMessages: [],
-        };
+      const systemMessages = (state?.messages ?? []).filter(message => SystemMessage.isInstance(message));
+      const messages = (state?.messages ?? []).filter(message => !SystemMessage.isInstance(message));
+      return {
+        messages: [
+          new RemoveMessage({ id: REMOVE_ALL_MESSAGES }),
+          ...systemMessages,
+          ...historyMessages,
+          ...messages,
+        ]
       }
-      return { historyMessages: [] };
+    },
+    afterModel: (state) => {
+      const historyMessages = state?.historyMessages ?? [];
+      return {
+        messages: historyMessages.map(message => new RemoveMessage({ id: message.id })),
+      };
     },
   });
 }

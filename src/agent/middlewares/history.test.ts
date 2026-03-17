@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { AIMessage, HumanMessage } from "@langchain/core/messages";
+import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { RemoveMessage } from "@langchain/core/messages";
 import {
   createHistoryMiddleware,
@@ -140,52 +140,138 @@ describe("serializeAgentState", () => {
   });
 });
 
-describe("createHistoryMiddleware afterAgent", () => {
-  it("strips history prefix from state.messages so only delta is returned and not duplicated when saved", () => {
-    const mw = createHistoryMiddleware();
-    const afterAgent = (mw as { afterAgent?: (s: AgentState) => { messages?: unknown[]; historyMessages?: unknown[] } })
-      .afterAgent;
-    expect(afterAgent).toBeDefined();
+type MiddlewareHooks = {
+  beforeAgent?: (s: unknown, r: { context?: unknown }) => Promise<{ historyMessages?: unknown[] }>;
+  beforeModel?: (s: Record<string, unknown>) => Promise<{ messages?: unknown[] }>;
+  afterModel?: (s: Record<string, unknown>) => { messages?: unknown[] };
+};
 
-    const historyMsg = new HumanMessage({ content: "old", id: "human1" });
-    const currentMsg = new HumanMessage({ content: "new", id: "human2" });
-    const aiMsg = new AIMessage({ content: "reply", id: "ai1" });
-    const state: AgentState = {
+describe("createHistoryMiddleware beforeModel", () => {
+  it("injects history between system messages and current messages", async () => {
+    const mw = createHistoryMiddleware() as MiddlewareHooks;
+
+    const sysMsg = new SystemMessage({ content: "You are helpful", id: "sys1" });
+    const historyHuman = new HumanMessage({ content: "old question", id: "hist1" });
+    const historyAi = new AIMessage({ content: "old answer", id: "hist2" });
+    const currentMsg = new HumanMessage({ content: "new question", id: "h1" });
+
+    const state = {
+      historyMessages: [historyHuman, historyAi],
+      messages: [sysMsg, currentMsg],
+    };
+
+    const result = await mw.beforeModel!(state);
+    const msgs = result.messages!;
+
+    expect(RemoveMessage.isInstance(msgs[0])).toBe(true);
+    expect(SystemMessage.isInstance(msgs[1])).toBe(true);
+    expect((msgs[1] as SystemMessage).content).toBe("You are helpful");
+    expect((msgs[2] as HumanMessage).content).toBe("old question");
+    expect((msgs[3] as AIMessage).content).toBe("old answer");
+    expect((msgs[4] as HumanMessage).content).toBe("new question");
+    expect(msgs).toHaveLength(5);
+  });
+
+  it("works when there are no history messages", async () => {
+    const mw = createHistoryMiddleware() as MiddlewareHooks;
+
+    const currentMsg = new HumanMessage({ content: "hello", id: "h1" });
+    const state = {
+      historyMessages: [],
+      messages: [currentMsg],
+    };
+
+    const result = await mw.beforeModel!(state);
+    const msgs = result.messages!;
+
+    expect(RemoveMessage.isInstance(msgs[0])).toBe(true);
+    expect((msgs[1] as HumanMessage).content).toBe("hello");
+    expect(msgs).toHaveLength(2);
+  });
+
+  it("works when historyMessages is undefined", async () => {
+    const mw = createHistoryMiddleware() as MiddlewareHooks;
+
+    const currentMsg = new HumanMessage({ content: "hi", id: "h1" });
+    const state = {
+      messages: [currentMsg],
+    };
+
+    const result = await mw.beforeModel!(state);
+    const msgs = result.messages!;
+
+    expect(RemoveMessage.isInstance(msgs[0])).toBe(true);
+    expect((msgs[1] as HumanMessage).content).toBe("hi");
+    expect(msgs).toHaveLength(2);
+  });
+
+  it("places multiple system messages before history", async () => {
+    const mw = createHistoryMiddleware() as MiddlewareHooks;
+
+    const sys1 = new SystemMessage({ content: "sys1", id: "s1" });
+    const sys2 = new SystemMessage({ content: "sys2", id: "s2" });
+    const historyMsg = new HumanMessage({ content: "old", id: "hist1" });
+    const currentMsg = new HumanMessage({ content: "new", id: "h1" });
+
+    const state = {
       historyMessages: [historyMsg],
-      messages: [historyMsg, currentMsg, aiMsg],
+      messages: [sys1, currentMsg, sys2],
     };
-    const result = afterAgent?.(state);
-    expect(result?.historyMessages).toEqual([]);
-    expect(result?.messages).toHaveLength(3);
-    const resultMessages = result?.messages ?? [];
-    expect(RemoveMessage.isInstance(resultMessages[0])).toBe(true);
-    expect(resultMessages[1]).toBe(currentMsg);
-    expect(resultMessages[2]).toBe(aiMsg);
+
+    const result = await mw.beforeModel!(state);
+    const msgs = result.messages!;
+
+    expect(RemoveMessage.isInstance(msgs[0])).toBe(true);
+    expect(SystemMessage.isInstance(msgs[1])).toBe(true);
+    expect(SystemMessage.isInstance(msgs[2])).toBe(true);
+    expect((msgs[3] as HumanMessage).content).toBe("old");
+    expect((msgs[4] as HumanMessage).content).toBe("new");
+    expect(msgs).toHaveLength(5);
+  });
+});
+
+describe("createHistoryMiddleware afterModel", () => {
+  it("returns RemoveMessage for each history message", () => {
+    const mw = createHistoryMiddleware() as MiddlewareHooks;
+
+    const hist1 = new HumanMessage({ content: "old1", id: "hist1" });
+    const hist2 = new AIMessage({ content: "old2", id: "hist2" });
+
+    const state = {
+      historyMessages: [hist1, hist2],
+      messages: [],
+    };
+
+    const result = mw.afterModel!(state);
+    const msgs = result.messages!;
+
+    expect(msgs).toHaveLength(2);
+    expect(RemoveMessage.isInstance(msgs[0])).toBe(true);
+    expect(RemoveMessage.isInstance(msgs[1])).toBe(true);
+    expect((msgs[0] as RemoveMessage).id).toBe("hist1");
+    expect((msgs[1] as RemoveMessage).id).toBe("hist2");
   });
 
-  it("returns REMOVE_ALL_MESSAGES plus empty when state.messages length is <= historyCount", () => {
-    const mw = createHistoryMiddleware();
-    const afterAgent = (mw as { afterAgent?: (s: AgentState) => { messages?: unknown[]; historyMessages?: unknown[] } })
-      .afterAgent;
-    const state: AgentState = {
-      historyMessages: [new HumanMessage({ content: "h1", id: "human1" }), new HumanMessage({ content: "h2", id: "human2" })],
-      messages: [new HumanMessage({ content: "h1", id: "human1" }), new HumanMessage({ content: "h2", id: "human2" })],
+  it("returns empty messages when no history was injected", () => {
+    const mw = createHistoryMiddleware() as MiddlewareHooks;
+
+    const state = {
+      historyMessages: [],
+      messages: [new HumanMessage({ content: "current", id: "h1" })],
     };
-    const result = afterAgent?.(state);
-    expect(result?.messages).toHaveLength(1);
-    expect(RemoveMessage.isInstance((result?.messages ?? [])[0])).toBe(true);
-    expect(result?.historyMessages).toEqual([]);
+
+    const result = mw.afterModel!(state);
+    expect(result.messages).toHaveLength(0);
   });
 
-  it("only clears historyMessages when no history was injected", () => {
-    const mw = createHistoryMiddleware();
-    const afterAgent = (mw as { afterAgent?: (s: AgentState) => { messages?: unknown[]; historyMessages?: unknown[] } })
-      .afterAgent;
-    const state: AgentState = {
-      messages: [new HumanMessage({ content: "only", id: "human1" })],
+  it("returns empty messages when historyMessages is undefined", () => {
+    const mw = createHistoryMiddleware() as MiddlewareHooks;
+
+    const state = {
+      messages: [new HumanMessage({ content: "current", id: "h1" })],
     };
-    const result = afterAgent?.(state);
-    expect(result?.historyMessages).toEqual([]);
-    expect(result?.messages).toBeUndefined();
+
+    const result = mw.afterModel!(state);
+    expect(result.messages).toHaveLength(0);
   });
 });
