@@ -113,9 +113,10 @@ describe("serializeAgentState", () => {
   it("returns messages from __interrupt__ value when state has __interrupt__ with nested AgentState", () => {
     const interruptValue: AgentState = {
       messages: [
-        new HumanMessage("Hello"),
+        new HumanMessage({ content: "Hello", id: "human1" }),
         new AIMessage({
-          content: "",
+          content: "reply",
+          id: "ai1",
           tool_calls: [
             { id: "tc1", name: "escalate_to_human", args: { reason: "Customer requested human", context: { ticketId: "T1" } } },
           ],
@@ -123,7 +124,7 @@ describe("serializeAgentState", () => {
       ],
     };
     const state: AgentState = {
-      messages: [new HumanMessage("Hello")],
+      messages: [new HumanMessage({ content: "Hello", id: "human1" })],
       __interrupt__: [{ value: interruptValue }],
     };
     const result = serializeAgentState(state);
@@ -132,7 +133,7 @@ describe("serializeAgentState", () => {
 
   it("returns only messages when no __interrupt__", () => {
     const state: AgentState = {
-      messages: [new HumanMessage("Hi")],
+      messages: [new HumanMessage({ content: "Hi", id: "human1" })],
     };
     const result = serializeAgentState(state);
     expect(result.messages).toHaveLength(1);
@@ -146,9 +147,9 @@ describe("createHistoryMiddleware afterAgent", () => {
       .afterAgent;
     expect(afterAgent).toBeDefined();
 
-    const historyMsg = new HumanMessage("old");
-    const currentMsg = new HumanMessage("new");
-    const aiMsg = new AIMessage("reply");
+    const historyMsg = new HumanMessage({ content: "old", id: "human1" });
+    const currentMsg = new HumanMessage({ content: "new", id: "human2" });
+    const aiMsg = new AIMessage({ content: "reply", id: "ai1" });
     const state: AgentState = {
       historyMessages: [historyMsg],
       messages: [historyMsg, currentMsg, aiMsg],
@@ -167,8 +168,8 @@ describe("createHistoryMiddleware afterAgent", () => {
     const afterAgent = (mw as { afterAgent?: (s: AgentState) => { messages?: unknown[]; historyMessages?: unknown[] } })
       .afterAgent;
     const state: AgentState = {
-      historyMessages: [new HumanMessage("h1"), new HumanMessage("h2")],
-      messages: [new HumanMessage("h1"), new HumanMessage("h2")],
+      historyMessages: [new HumanMessage({ content: "h1", id: "human1" }), new HumanMessage({ content: "h2", id: "human2" })],
+      messages: [new HumanMessage({ content: "h1", id: "human1" }), new HumanMessage({ content: "h2", id: "human2" })],
     };
     const result = afterAgent?.(state);
     expect(result?.messages).toHaveLength(1);
@@ -181,7 +182,7 @@ describe("createHistoryMiddleware afterAgent", () => {
     const afterAgent = (mw as { afterAgent?: (s: AgentState) => { messages?: unknown[]; historyMessages?: unknown[] } })
       .afterAgent;
     const state: AgentState = {
-      messages: [new HumanMessage("only")],
+      messages: [new HumanMessage({ content: "only", id: "human1" })],
     };
     const result = afterAgent?.(state);
     expect(result?.historyMessages).toEqual([]);

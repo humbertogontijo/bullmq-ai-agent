@@ -124,7 +124,19 @@ export function createHistoryMiddleware() {
         messages: [...history, ...messages],
       });
     },
-    afterAgent: () => {
+    afterAgent: (state) => {
+      const historyMessages = state?.historyMessages ?? [];
+      const messages = state?.messages ?? [];
+      if (historyMessages.length > 0) {
+        const delta = messages.filter(message => !historyMessages.find(h => h.id != undefined && h.id === message.id));
+        return {
+          messages: [
+            new RemoveMessage({ id: REMOVE_ALL_MESSAGES }),
+            ...delta,
+          ],
+          historyMessages: [],
+        };
+      }
       return { historyMessages: [] };
     },
   });
