@@ -217,15 +217,15 @@ describe("BullMQAgentClient", () => {
     });
   });
 
-  describe("resume", () => {
-    it("adds run job with messages (resume)", async () => {
+  describe("run with full messages (resume-style)", () => {
+    it("adds run job with messages", async () => {
       mockAdd.mockResolvedValue({ id: "resume-1" });
 
       const messages: StoredHumanMessage[] = [
         { type: "human", data: { content: "Hi", name: undefined } },
         { type: "human", data: { content: "Approved", name: undefined } },
       ];
-      const result = await client.resume("default", "t1", { messages });
+      const result = await client.run("default", "t1", { messages });
 
       expect(result.jobId).toBe("resume-1");
       expect(typeof result.promise).toBe("object");
@@ -250,13 +250,13 @@ describe("BullMQAgentClient", () => {
       const resumeData = {
         messages: [{ type: "human", data: { content: "Approved", name: undefined } } satisfies StoredHumanMessage],
       };
-      const resumeResult = await client.resume("default", "t1", { ...resumeData, ttl: 5_000 });
-      const result = await resumeResult.promise;
+      const runResult = await client.run("default", "t1", { ...resumeData, ttl: 5_000 });
+      const result = await runResult.promise;
 
       expect(result.messages).toBeDefined();
     });
 
-    it("await result returns serialized state when resume job finishes interrupted (does not hang)", async () => {
+    it("await result returns serialized state when run finishes interrupted (does not hang)", async () => {
       mockAdd.mockResolvedValue({ id: "resume-wait-2" });
       mockGetJob.mockResolvedValue({
         id: "resume-wait-2",
@@ -264,8 +264,8 @@ describe("BullMQAgentClient", () => {
       });
 
       const resumeData = { messages: [{ type: "human", data: { content: "Approved", name: undefined } } satisfies StoredHumanMessage] };
-      const resumeResult = await client.resume("default", "t1", { ...resumeData, ttl: 5_000 });
-      const result = await resumeResult.promise;
+      const runResult = await client.run("default", "t1", { ...resumeData, ttl: 5_000 });
+      const result = await runResult.promise;
 
       expect(result).toBeDefined();
       expect(result.messages).toBeDefined();
@@ -358,6 +358,37 @@ describe("BullMQAgentClient", () => {
 
       expect(result).toBeDefined();
       expect(result.messages).toBeDefined();
+    });
+  });
+
+  describe("buildRunFlowChild, buildResumeToolFlowChild", () => {
+    it("buildRunFlowChild returns flow child spec for run (no job added)", () => {
+      const message: StoredHumanMessage = { type: "human", data: { content: "Hi", name: undefined } };
+      const child = client.buildRunFlowChild("agent-1", "thread-1", { messages: [message] });
+
+      expect(child.name).toBe("run");
+      expect(child.queueName).toBe("agent");
+      expect(child.data).toEqual({
+        agentId: "agent-1",
+        threadId: "thread-1",
+        input: { messages: [message] },
+      });
+      expect(child.opts?.jobId).toMatch(/^thread-1\/\d+$/);
+      expect(mockAdd).not.toHaveBeenCalled();
+    });
+
+    it("buildResumeToolFlowChild returns flow child spec for resumeTool", () => {
+      const child = client.buildResumeToolFlowChild("agent-1", "thread-3", { content: "Approved" });
+
+      expect(child.name).toBe("resumeTool");
+      expect(child.queueName).toBe("agent");
+      expect(child.data).toEqual({
+        agentId: "agent-1",
+        threadId: "thread-3",
+        content: "Approved",
+      });
+      expect(child.opts?.jobId).toMatch(/^thread-3\/\d+$/);
+      expect(mockAdd).not.toHaveBeenCalled();
     });
   });
 

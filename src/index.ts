@@ -9,6 +9,8 @@
 
 export { BullMQAgentClient, ClientResult, ClientResultError } from "./client.js";
 export type {
+  AgentResumeToolFlowChild,
+  AgentRunFlowChild,
   BullMQAgentClientOptions,
   ClientResultMeta,
   IngestDocument,
@@ -16,13 +18,14 @@ export type {
   IngestResult,
   JobProgress,
   MessageRole,
-  ResumeOptions,
   ResumeResult,
+  ResumeToolFlowChildOptions,
   ResumeToolOptions,
+  RunFlowChildOptions,
   RunOptions,
   RunResult,
   SearchKnowledgeOptions,
-  SearchResult
+  SearchResult,
 } from "./client.js";
 
 export { BullMQAgentWorker } from "./worker.js";

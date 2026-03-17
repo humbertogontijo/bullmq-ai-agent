@@ -1,11 +1,11 @@
-import type { Queue, QueueOptions } from "bullmq";
+import type { FlowChildJob, Queue, QueueOptions } from "bullmq";
 import { QueueEvents } from "bullmq";
 import { QUEUE_NAMES } from "./options.js";
 import { snowflake } from "./utils/snowflake.js";
 import { createAgentQueue } from "./queues/agentQueue.js";
 import { createIngestQueue } from "./queues/ingestQueue.js";
 import { createSearchQueue } from "./queues/searchQueue.js";
-import type { AgentJobData, AgentJobResult, IngestJobData, IngestJobResult, SearchJobData, SearchJobResult, StoredMessage } from "./queues/types.js";
+import type { AgentJobData, AgentJobResult, AgentResumeToolData, AgentRunData, IngestJobData, IngestJobResult, SearchJobData, SearchJobResult, StoredMessage } from "./queues/types.js";
 
 export type MessageRole = "user" | "assistant" | "system";
 
@@ -15,44 +15,60 @@ export interface JobProgress {
   [key: string]: unknown;
 }
 
-export interface RunOptions {
-  /** Subagent name; when set, that subagent runs directly (must match a subagent name from BullMQAgentWorker options). */
-  subagentId?: string;
-  /** Initial messages (StoredMessage[], e.g. [{ type: "human", data: { content: "Hello" } }]). */
-  messages: StoredMessage[];
+export interface AwaitableOptions {
   /** Called when the worker reports progress (e.g. graph node stage). Uses BullMQ job progress. */
   onProgress?: (progress: JobProgress) => void;
+  /** Time-to-live (ms) when awaiting the result. Default 120_000. */
+  ttl?: number;
+}
+
+/** Options for buildRunFlowChild: no waiting; used to build a flow child node. */
+export interface RunFlowChildOptions {
+  /** Initial messages (StoredMessage[], e.g. [{ type: "human", data: { content: "Hello" } }]). */
+  messages: StoredMessage[];
+  /** Subagent name; when set, that subagent runs directly (must match a subagent name from BullMQAgentWorker options). */
+  subagentId?: string;
   /** Optional run-level metadata (e.g. owner, tenant). Passed to configurable so tools and getAgentConfig can read it. */
   metadata?: Record<string, unknown>;
-  /** Time-to-live (ms) when awaiting the result. Default 120_000. */
-  ttl?: number;
 }
 
-export interface ResumeOptions {
-  /** New messages to append (e.g. human reply after interrupt). History is loaded and prepended by the worker. */
-  messages: StoredMessage[];
-  /** Pass when resuming so the same runnable (main or subagent) is used. */
-  subagentId?: string;
-  /** Called when the worker reports progress. */
-  onProgress?: (progress: JobProgress) => void;
-  /** Optional run-level metadata. Passed to configurable so tools and getAgentConfig can read it. */
-  metadata?: Record<string, unknown>;
-  /** Time-to-live (ms) when awaiting the result. Default 120_000. */
-  ttl?: number;
+/** Options for run(); extends RunFlowChildOptions with await-specific options. */
+export interface RunOptions extends RunFlowChildOptions, AwaitableOptions {
 }
 
-/** Options for resumeTool: send only content; worker builds tool message from last job's AI tool_call_id. */
-export interface ResumeToolOptions {
+/** Options for buildResumeToolFlowChild: no waiting; used to build a flow child node. */
+export interface ResumeToolFlowChildOptions {
   /** Human response content for the request_human_approval tool. */
   content: string;
   /** Pass when resuming so the same runnable (main or subagent) is used. */
   subagentId?: string;
-  /** Called when the worker reports progress. */
-  onProgress?: (progress: JobProgress) => void;
   /** Optional run-level metadata. */
   metadata?: Record<string, unknown>;
-  /** Time-to-live (ms) when awaiting the result. Default 120_000. */
-  ttl?: number;
+}
+
+/** Options for resumeTool(); extends ResumeToolFlowChildOptions with await-specific options. */
+export interface ResumeToolOptions extends ResumeToolFlowChildOptions, AwaitableOptions { }
+
+/**
+ * Flow child spec for an agent "run" job. Use as a child in FlowProducer.add() so the agent runs
+ * as part of your flow; when it completes, the parent job runs and can read the AI result via getChildrenValues().
+ * Use the same Redis connection and prefix for your FlowProducer as for BullMQAgentClient.
+ */
+export interface AgentRunFlowChild extends FlowChildJob {
+  name: "run";
+  queueName: string;
+  data: AgentRunData;
+  opts?: { jobId: string };
+}
+
+/**
+ * Flow child spec for an agent "resumeTool" job. Use as a child in FlowProducer.add().
+ */
+export interface AgentResumeToolFlowChild extends FlowChildJob {
+  name: "resumeTool";
+  queueName: string;
+  data: AgentResumeToolData;
+  opts?: { jobId: string };
 }
 
 export interface IngestDocument {
@@ -170,7 +186,7 @@ export class ClientResult<T> {
 /** Result of run(); use .jobId and await .promise for AgentJobResult (throws ClientResultError if no job or not found). */
 export type RunResult = ClientResult<AgentJobResult>;
 
-/** Result of resume() or resumeTool(); use .jobId and await .promise (throws ClientResultError if no job or not found). */
+/** Result of resumeTool(); use .jobId and await .promise (throws ClientResultError if no job or not found). */
 export type ResumeResult = ClientResult<AgentJobResult>;
 
 /** Result of ingest(); use .jobId and await .promise (throws ClientResultError if no job or not found). */
@@ -235,21 +251,13 @@ export class BullMQAgentClient {
     threadId: string,
     options: RunOptions
   ): Promise<RunResult> {
-    const agentQueue = this.agentQueue;
-    const messages = options.messages;
-    const jobId = `${threadId}/${snowflake()}`;
-    const job = await agentQueue.add(
-      "run",
-      {
-        agentId: agentId,
-        threadId: threadId,
-        subagentId: options.subagentId,
-        metadata: options.metadata,
-        input: { messages },
-      },
-      { jobId }
-    );
-    const resolvedJobId = job.id ?? jobId;
+    const spec = this.buildRunFlowChild(agentId, threadId, {
+      messages: options.messages,
+      subagentId: options.subagentId,
+      metadata: options.metadata,
+    });
+    const job = await this.agentQueue.add(spec.name, spec.data, spec.opts);
+    const resolvedJobId = job.id ?? spec.opts?.jobId;
     return new ClientResult<AgentJobResult>(
       this.agentQueue,
       this.agentQueueEvents,
@@ -257,25 +265,6 @@ export class BullMQAgentClient {
       options.ttl ?? defaultWaitTtl,
       options.onProgress
     );
-  }
-
-  /**
-   * Resume a run after a human-in-the-loop interrupt. Same as run but uses only the provided messages
-   * (no history from previous jobs). Returns ClientResult<AgentJobResult>: await for the job result.
-   * Prefer resumeTool() when you only have the human response content; the worker then builds the tool message.
-   */
-  async resume(
-    agentId: string,
-    threadId: string,
-    options: ResumeOptions
-  ): Promise<ResumeResult> {
-    return this.run(agentId, threadId, {
-      messages: options.messages,
-      subagentId: options.subagentId,
-      metadata: options.metadata,
-      onProgress: options.onProgress,
-      ttl: options.ttl,
-    });
   }
 
   /**
@@ -288,19 +277,13 @@ export class BullMQAgentClient {
     threadId: string,
     options: ResumeToolOptions
   ): Promise<ResumeResult> {
-    const jobId = `${threadId}/${snowflake()}`;
-    const job = await this.agentQueue.add(
-      "resumeTool",
-      {
-        agentId,
-        threadId,
-        content: options.content,
-        subagentId: options.subagentId,
-        metadata: options.metadata,
-      },
-      { jobId }
-    );
-    const resolvedJobId = job.id ?? jobId;
+    const spec = this.buildResumeToolFlowChild(agentId, threadId, {
+      content: options.content,
+      subagentId: options.subagentId,
+      metadata: options.metadata,
+    });
+    const job = await this.agentQueue.add(spec.name, spec.data, spec.opts);
+    const resolvedJobId = job.id ?? spec.opts?.jobId;
     return new ClientResult<AgentJobResult>(
       this.agentQueue,
       this.agentQueueEvents,
@@ -308,6 +291,48 @@ export class BullMQAgentClient {
       options.ttl ?? defaultWaitTtl,
       options.onProgress
     );
+  }
+
+  /**
+   * Build a flow child node for a new agent run. Use this as a child in FlowProducer.add() so the agent
+   * runs as part of your BullMQ flow; when the agent job completes, the parent job runs and can read
+   * the AI result via job.getChildrenValues(). Use the same connection and prefix for your FlowProducer
+   * as for this client. Does not add any job to the queue — the job is created when the flow is added.
+   */
+  buildRunFlowChild(agentId: string, threadId: string, options: RunFlowChildOptions): AgentRunFlowChild {
+    const jobId = `${threadId}/${snowflake()}`;
+    return {
+      name: "run",
+      queueName: QUEUE_NAMES.AGENT,
+      data: {
+        agentId,
+        threadId,
+        subagentId: options.subagentId,
+        metadata: options.metadata,
+        input: { messages: options.messages },
+      },
+      opts: { jobId },
+    };
+  }
+
+  /**
+   * Build a flow child node for resumeTool (human-in-the-loop response). Use as a child in FlowProducer.add().
+   * When the flow is added, the agent job is created; when it completes, the parent runs with getChildrenValues().
+   */
+  buildResumeToolFlowChild(agentId: string, threadId: string, options: ResumeToolFlowChildOptions): AgentResumeToolFlowChild {
+    const jobId = `${threadId}/${snowflake()}`;
+    return {
+      name: "resumeTool",
+      queueName: QUEUE_NAMES.AGENT,
+      data: {
+        agentId,
+        threadId,
+        content: options.content,
+        subagentId: options.subagentId,
+        metadata: options.metadata,
+      },
+      opts: { jobId },
+    };
   }
 
   /**

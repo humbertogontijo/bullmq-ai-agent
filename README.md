@@ -23,7 +23,7 @@ Define subagents, system prompts, and per-agent config (getAgentConfig), connect
 └─────────┘                                                                           │
      ▲                                                                                ▼
      │    result.promise → AgentJobResult (messages)                             AgentWorker
-     │    resumeTool(..., { content }) or resume(..., { messages })                (LangGraph)
+     │    resumeTool(..., { content }) or run(..., { messages })                (LangGraph)
      │                                                                                │
      │                                                                     tools: search_knowledge,
      │                                                                     request_human_approval
@@ -33,7 +33,7 @@ Define subagents, system prompts, and per-agent config (getAgentConfig), connect
      └───────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Client** enqueues `run` or `resumeTool` jobs with `agentId`, `threadId`, and options. Use `result.jobId` and `await result.promise` to wait for the job. Pass `ttl` (ms) in options when creating the run/resumeTool/resume/ingest/search to set the wait timeout. **resumeTool** sends only `content`; the worker fetches the last job for the thread and builds the tool message. **resume()** is still available: same as `run()` with full messages.
+- **Client** enqueues `run` or `resumeTool` jobs with `agentId`, `threadId`, and options. Use `result.jobId` and `await result.promise` to wait for the job. Pass `ttl` (ms) in options when creating the run/resumeTool/ingest/search to set the wait timeout. **resumeTool** sends only `content`; the worker fetches the last job for the thread and builds the tool message. Use `run()` with full messages to resume with a full message list.
 - **AgentWorker** runs the LangGraph agent with built-in tools. On each completed job it registers the job id in a Redis sorted set per thread so `resumeTool` can fetch the last job. Job result is the final stream state (serialized messages). When the graph interrupts (e.g. human-in-the-loop), the client uses `isResumeRequired(result)` then `resumeTool(..., { content })`.
 - **Thread history** is built by the worker from previous job return values in the same thread (SCAN by `threadId`, load job results, concatenate messages). No Redis checkpointer; history lives in job results.
 - **Tools, and ingest** run as separate BullMQ workers; the library starts them together via `BullMQAgentWorker`.
@@ -44,14 +44,14 @@ Client and worker must use the same Redis `connection` and, if you set it, the s
 
 1. **Thread history is job-result–based** — For each run, the worker finds previous jobs in the same thread (by `threadId`, `jobId` format `threadId/<snowflake>`), loads their return values, and prepends those messages to the current input. So conversation history is reconstructed from completed (or interrupted) job results, not from a separate store. **Limit:** at most 500 previous jobs are loaded per run by default; very long threads may not have full history in context. Use the optional `maxHistoryMessages` worker option to pass a lower limit into the Lua script (it caps the number of previous jobs loaded).
 2. **resumeTool (preferred)** — After a human-in-the-loop interrupt, the client calls `client.resumeTool(agentId, threadId, { content: humanInput })`. The worker fetches the last executed job for that thread from a Redis sorted set, loads its return value, finds the last AI message's `request_human_approval` tool_call_id, builds the tool message, and runs the graph. Requires a previous run for that thread so the job was registered in the thread-jobs set.
-3. **resume()** — Alternative: build the full message list (previous result messages plus the human's tool reply) and call `client.resume(agentId, threadId, { messages })`; the worker uses only those messages (no prior job history prepended).
-4. **Human-in-the-loop detection** — The client considers “resume required” when the last message in the job result is an AI message with a `request_human_approval` tool call. Use `isResumeRequired(result)` to detect that; then call `resumeTool(agentId, threadId, { content })` or `resume(..., { messages })`.
+3. **Resume with full messages** — Build the full message list (previous result messages plus the human's tool reply) and call `client.run(agentId, threadId, { messages })`; the worker uses only those messages (no prior job history prepended).
+4. **Human-in-the-loop detection** — The client considers “resume required” when the last message in the job result is an AI message with a `request_human_approval` tool call. Use `isResumeRequired(result)` to detect that; then call `resumeTool(agentId, threadId, { content })` or `run(..., { messages })`.
 
 ### Subagents
 
 A **subagent** has `name`, `description`, and `systemPrompt`; optional `tools` and `model`. When you pass `subagentId` in `RunOptions`, that subagent runs directly. You can also use `getAgentConfig(agentId)` on the worker to load per-agent system prompt and default model/temperature.
 
-Sessions are identified by `agentId` + `threadId`. On each `run`, the worker prepends messages from previous jobs in the thread and registers the job in a Redis sorted set for that thread. When resuming via `resumeTool()`, the worker loads the last job's state and builds the tool message; when resuming via `resume()`, only the given `messages` are used.
+Sessions are identified by `agentId` + `threadId`. On each `run`, the worker prepends messages from previous jobs in the thread and registers the job in a Redis sorted set for that thread. When resuming via `resumeTool()`, the worker loads the last job's state and builds the tool message; when resuming via `run()` with full messages, only the given `messages` are used.
 
 ### RAG (Retrieval Augmented Generation)
 
@@ -196,8 +196,9 @@ await client.close();
 |--------|-------------|
 | `run(agentId, threadId, options)` | Enqueue a run job. Returns `ClientResult<AgentJobResult>`; use `await result.promise` for the job result. Pass `ttl` in options for wait timeout (ms). Job result is the final stream state (`{ messages: StoredMessage[] }`). |
 | `resumeTool(agentId, threadId, options)` | Resume after human-in-the-loop: send only `options.content`; the worker fetches the last job for the thread and builds the tool message. Returns `ClientResult<AgentJobResult>`. Requires a previous run for that thread. |
-| `resume(agentId, threadId, options)` | Resume with full messages (same as `run()` with `options.messages`). Use when you already have the full message list. |
 | `ingest({ agentId, source })` | Add a document to the agent’s RAG index. `source`: `{ type: 'url'\|'file'\|'text', content: string, metadata? }`. |
+| `buildRunFlowChild(agentId, threadId, options)` | Return a flow child spec for a run job. Use as a child in BullMQ `FlowProducer.add()` so the agent runs inside your flow; when it completes, the parent job runs and can read the AI result via `job.getChildrenValues()`. No job is added until you add the flow. |
+| `buildResumeToolFlowChild(agentId, threadId, options)` | Return a flow child spec for a resumeTool job. Use as a child in `FlowProducer.add()` to resume human-in-the-loop inside a flow. |
 | `getAgentJob(jobId)` | Get an agent-queue job by id. |
 | `close()` | Close queue connections. |
 
@@ -211,16 +212,37 @@ await client.close();
 - `content: string` — Human response for the `request_human_approval` tool.
 - `subagentId?: string`, `metadata?: Record<string, unknown>`, `onProgress?`, `ttl?: number` — Same as run options.
 
-**ResumeOptions**
+If `ttl` (passed in run/resumeTool/ingest/search options) is exceeded when awaiting the result, the wait fails (the job may still be running). Use a larger `ttl` for long runs or poll `getAgentJob(jobId)` for fire-and-forget flows.
 
-- `messages: StoredMessage[]` — Full message list for the run.
+**BullMQ Flows (run/resume without waiting)**
 
-If `ttl` (passed in run/resumeTool/resume/ingest/search options) is exceeded when awaiting the result, the wait fails (the job may still be running). Use a larger `ttl` for long runs or poll `getAgentJob(jobId)` for fire-and-forget flows.
+Instead of awaiting the agent result, you can plug the agent into your own BullMQ flow so that when the AI finishes, your parent job runs (with reliability and retries). Create a `FlowProducer` with the **same connection and prefix** as `BullMQAgentClient`, then use the flow-child builders as children:
+
+```typescript
+import { FlowProducer } from "bullmq";
+import { BullMQAgentClient, QUEUE_NAMES } from "bullmq-ai-agent";
+
+const connection = { host: "localhost", port: 6379 };
+const client = new BullMQAgentClient({ connection });
+const flowProducer = new FlowProducer({ connection });
+
+// Agent run as the only child; when it completes, the parent runs and can use getChildrenValues()
+const agentChild = client.buildRunFlowChild("agent-1", "thread-1", {
+  messages: [{ type: "human", data: { content: "Summarize this", name: undefined } }],
+});
+const flow = await flowProducer.add({
+  name: "after-ai",
+  queueName: "my-downstream-queue",
+  data: {},
+  children: [agentChild],
+});
+// Process the parent job in your worker; use job.getChildrenValues() to get the agent result.
+```
 
 **Helpers for human-in-the-loop**
 
 - **`isResumeRequired(chunk: StoredAgentState): boolean`** — Returns true when the last message in the chunk is an AI message with a `request_human_approval` tool call.
-- **`resumeTool(agentId, threadId, { content })`** — Preferred: worker builds the tool message from the last job. Alternatively, build full messages and pass to `client.resume(..., { messages })`.
+- **`resumeTool(agentId, threadId, { content })`** — Preferred: worker builds the tool message from the last job. Alternatively, build full messages and pass to `client.run(..., { messages })`.
 
 ### BullMQAgentWorker
 
@@ -244,7 +266,7 @@ If `ttl` (passed in run/resumeTool/resume/ingest/search options) is exceeded whe
 
 Job return value is the final stream state (serializable):
 
-- `messages: StoredMessage[]` — Full message list at the end of the run or at the interrupt. When the run was interrupted by `request_human_approval`, the last message is an AI message with `tool_calls`; use `isResumeRequired(result)` to detect that, then call `resumeTool(agentId, threadId, { content: humanInput })` or build full messages and `resume(..., { messages })`.
+- `messages: StoredMessage[]` — Full message list at the end of the run or at the interrupt. When the run was interrupted by `request_human_approval`, the last message is an AI message with `tool_calls`; use `isResumeRequired(result)` to detect that, then call `resumeTool(agentId, threadId, { content: humanInput })` or build full messages and `run(..., { messages })`.
 
 When the job is missing or not found, awaiting the result may resolve to a fallback object with `status: 'no_job' | 'job_not_found'` (see `AwaitableResultFallback` in types). Use `"status" in result` to narrow the type before reading `messages`.
 
@@ -290,7 +312,7 @@ interface Subagent {
 The agent is configured with these tools (no need to register them yourself):
 
 - **search_knowledge** — RAG search over the agent’s ingested documents (when ingest worker and `embeddingModelOptions` are used).
-- **request_human_approval** — Pauses the run and returns an interrupt; resume with `resumeTool(..., { content })` or `resume(..., { messages })`.
+- **request_human_approval** — Pauses the run and returns an interrupt; resume with `resumeTool(..., { content })` or `run(..., { messages })`.
 - **escalate_to_human** — Full handoff to a human (no resume). Inspect the last AI message's `tool_calls` in `result.messages` for reason/context to route and display.
 ## Examples
 
@@ -313,7 +335,7 @@ You will be prompted for an OpenAI API key (stored in `.agent.json` for next run
 ## Exports
 
 - **Client / Worker:** `BullMQAgentClient`, `ClientResult`, `BullMQAgentWorker`, `BullMQAgentWorkerOptions`, `BullMQAgentClientOptions`
-- **Types:** `RunOptions`, `RunResult`, `ResumeOptions`, `ResumeToolOptions`, `AwaitableResultFallback`, `AgentJobResult`, `StoredAgentState`, `StoredMessage`, `MessageRole`, `ModelOptions`, `RunContext`, `AgentConfig`, `Skill`, `Subagent`
+- **Types:** `RunOptions`, `RunResult`, `ResumeToolOptions`, `AwaitableResultFallback`, `AgentJobResult`, `StoredAgentState`, `StoredMessage`, `MessageRole`, `ModelOptions`, `RunContext`, `AgentConfig`, `Skill`, `Subagent`
 - **Helpers:** `getLastRequestHumanApprovalToolCall`, `isResumeRequired`
 - **Queues:** `createAgentQueue`, `createIngestQueue`, `createSearchQueue`, `QUEUE_NAMES`
 - **Agent / RAG:** `compileGraph`, `VectorStoreProvider`, `VectorStoreProviderOptions`, `createProgressMiddleware`, `ProgressPayload`, `ProgressStage`
