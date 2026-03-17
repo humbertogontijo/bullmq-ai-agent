@@ -7,10 +7,14 @@ import type { StoredAgentState, StoredHumanMessage } from "./queues/types.js";
 const mockAdd = vi.fn();
 const mockGetJob = vi.fn();
 
+const mockQueueEventsOn = vi.fn();
+const mockQueueEventsOff = vi.fn();
 vi.mock("bullmq", () => ({
   QueueEvents: vi.fn().mockImplementation(function (this: unknown) {
     return {
       close: vi.fn().mockResolvedValue(undefined),
+      on: mockQueueEventsOn,
+      off: mockQueueEventsOff,
     };
   }),
 }));
@@ -66,6 +70,8 @@ describe("BullMQAgentClient", () => {
     client = new BullMQAgentClient(defaultClientOptions);
     mockAdd.mockReset();
     mockGetJob.mockReset();
+    mockQueueEventsOn.mockClear();
+    mockQueueEventsOff.mockClear();
     mockGetJob.mockResolvedValue({ waitUntilFinished: vi.fn().mockResolvedValue({ messages: [] }) });
     mockIngestAdd.mockReset();
     mockIngestAdd.mockResolvedValue({ id: "ingest-1" });
@@ -389,6 +395,21 @@ describe("BullMQAgentClient", () => {
       });
       expect(child.opts?.jobId).toMatch(/^thread-3\/\d+$/);
       expect(mockAdd).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("subscribeToAgentProgress", () => {
+    it("subscribes to progress for jobId and returns unsubscribe", () => {
+      const onProgress = vi.fn();
+      const unsubscribe = client.subscribeToAgentProgress("job-123", onProgress);
+
+      expect(mockQueueEventsOn).toHaveBeenCalledWith("progress", expect.any(Function));
+      expect(mockQueueEventsOn).toHaveBeenCalledWith("completed", expect.any(Function));
+      expect(mockQueueEventsOn).toHaveBeenCalledWith("failed", expect.any(Function));
+      expect(mockQueueEventsOn).toHaveBeenCalledTimes(3);
+
+      unsubscribe();
+      expect(mockQueueEventsOff).toHaveBeenCalledTimes(3);
     });
   });
 

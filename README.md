@@ -199,6 +199,7 @@ await client.close();
 | `ingest({ agentId, source })` | Add a document to the agent’s RAG index. `source`: `{ type: 'url'\|'file'\|'text', content: string, metadata? }`. |
 | `buildRunFlowChild(agentId, threadId, options)` | Return a flow child spec for a run job. Use as a child in BullMQ `FlowProducer.add()` so the agent runs inside your flow; when it completes, the parent job runs and can read the AI result via `job.getChildrenValues()`. No job is added until you add the flow. |
 | `buildResumeToolFlowChild(agentId, threadId, options)` | Return a flow child spec for a resumeTool job. Use as a child in `FlowProducer.add()` to resume human-in-the-loop inside a flow. |
+| `subscribeToAgentProgress(jobId, onProgress)` | Subscribe to progress events for an agent job by id. Use when the job was enqueued via a flow (e.g. buildRunFlowChild); returns an unsubscribe function. Subscription is also cleared when the job completes or fails. |
 | `getAgentJob(jobId)` | Get an agent-queue job by id. |
 | `close()` | Close queue connections. |
 
@@ -237,6 +238,8 @@ const flow = await flowProducer.add({
   children: [agentChild],
 });
 // Process the parent job in your worker; use job.getChildrenValues() to get the agent result.
+// To listen to progress for the agent job (e.g. jobId from agentChild.opts?.jobId or the flow result), use:
+// client.subscribeToAgentProgress(jobId, (progress) => { ... }). Returns an unsubscribe function.
 ```
 
 **Helpers for human-in-the-loop**

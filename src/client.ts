@@ -87,6 +87,35 @@ export interface IngestOptions {
 
 const defaultWaitTtl = 120_000; // 2 minutes
 
+/**
+ * Subscribe to progress events for a job on a queue. Returns an unsubscribe function; the subscription
+ * is also cleared automatically when the job completes or fails.
+ */
+function subscribeToProgress(
+  queueEvents: QueueEvents,
+  jobId: string,
+  onProgress: (progress: JobProgress) => void
+): () => void {
+  const progressHandler = (args: { jobId: string; data: unknown }, _id?: string) => {
+    if (args.jobId === jobId) onProgress(args.data as JobProgress);
+  };
+  const remove = () => {
+    queueEvents.off("progress", progressHandler);
+    queueEvents.off("completed", completedHandler);
+    queueEvents.off("failed", failedHandler);
+  };
+  const completedHandler = ({ jobId: id }: { jobId: string }) => {
+    if (id === jobId) remove();
+  };
+  const failedHandler = ({ jobId: id }: { jobId: string }) => {
+    if (id === jobId) remove();
+  };
+  queueEvents.on("progress", progressHandler);
+  queueEvents.on("completed", completedHandler);
+  queueEvents.on("failed", failedHandler);
+  return remove;
+}
+
 /** Meta attached to a client result (jobId). */
 export interface ClientResultMeta {
   jobId: string | undefined;
@@ -140,30 +169,9 @@ export class ClientResult<T> {
     this.jobId = safeMeta.jobId;
     this._unsubscribeProgress = undefined;
     if (this.jobId && onProgress) {
-      this._unsubscribeProgress = this._subscribeProgress(this.jobId, onProgress);
+      this._unsubscribeProgress = subscribeToProgress(this._queueEvents, this.jobId, onProgress);
     }
     this.promise = this._wait();
-  }
-
-  private _subscribeProgress(jobId: string, onProgress: (progress: JobProgress) => void): () => void {
-    const progressHandler = (args: { jobId: string; data: unknown }, _id?: string) => {
-      if (args.jobId === jobId) onProgress(args.data as JobProgress);
-    };
-    const remove = () => {
-      this._queueEvents.off("progress", progressHandler);
-      this._queueEvents.off("completed", completedHandler);
-      this._queueEvents.off("failed", failedHandler);
-    };
-    const completedHandler = ({ jobId: id }: { jobId: string }) => {
-      if (id === jobId) remove();
-    };
-    const failedHandler = ({ jobId: id }: { jobId: string }) => {
-      if (id === jobId) remove();
-    };
-    this._queueEvents.on("progress", progressHandler);
-    this._queueEvents.on("completed", completedHandler);
-    this._queueEvents.on("failed", failedHandler);
-    return remove;
   }
 
   private async _wait(): Promise<T> {
@@ -298,6 +306,8 @@ export class BullMQAgentClient {
    * runs as part of your BullMQ flow; when the agent job completes, the parent job runs and can read
    * the AI result via job.getChildrenValues(). Use the same connection and prefix for your FlowProducer
    * as for this client. Does not add any job to the queue — the job is created when the flow is added.
+   * To listen to progress for the agent job, use the jobId from the child's opts (or from the flow result)
+   * with subscribeToAgentProgress(jobId, onProgress).
    */
   buildRunFlowChild(agentId: string, threadId: string, options: RunFlowChildOptions): AgentRunFlowChild {
     const jobId = `${threadId}/${snowflake()}`;
@@ -318,6 +328,7 @@ export class BullMQAgentClient {
   /**
    * Build a flow child node for resumeTool (human-in-the-loop response). Use as a child in FlowProducer.add().
    * When the flow is added, the agent job is created; when it completes, the parent runs with getChildrenValues().
+   * To listen to progress for the agent job, use the jobId from the child's opts with subscribeToAgentProgress(jobId, onProgress).
    */
   buildResumeToolFlowChild(agentId: string, threadId: string, options: ResumeToolFlowChildOptions): AgentResumeToolFlowChild {
     const jobId = `${threadId}/${snowflake()}`;
@@ -375,6 +386,16 @@ export class BullMQAgentClient {
       { jobId: job.id },
       ttl ?? defaultWaitTtl
     );
+  }
+
+  /**
+   * Subscribe to progress events for an agent job by id. Use this when the job was enqueued via a flow
+   * (e.g. using buildRunFlowChild or buildResumeToolFlowChild) and you have the jobId from the flow.
+   * Returns an unsubscribe function; the subscription is also cleared automatically when the job
+   * completes or fails.
+   */
+  subscribeToAgentProgress(jobId: string, onProgress: (progress: JobProgress) => void): () => void {
+    return subscribeToProgress(this.agentQueueEvents, jobId, onProgress);
   }
 
   /**
