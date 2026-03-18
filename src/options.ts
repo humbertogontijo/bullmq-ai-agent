@@ -3,6 +3,15 @@ import { Job } from "bullmq";
 import type { Redis } from "ioredis";
 import { z } from "zod";
 import type { AgentMemoryStore } from "./memory/AgentMemoryStore.js";
+import type { TodoItem } from "./queues/types.js";
+
+/** Callback signature for providing initial todos per run. */
+export type GetTodosCallback = (ctx: {
+  agentId: string;
+  threadId: string;
+  contactId?: string;
+  metadata?: Record<string, unknown>;
+}) => TodoItem[] | Promise<TodoItem[]>;
 
 export interface AgentWorkerLogger {
   error: (msg: string, err?: Error) => void;
@@ -82,6 +91,8 @@ export const runContextContextSchema = z.object({
   maxHistoryMessages: z.number().optional(),
   /** Cross-thread memory store scoped by agentId. Set by worker when enableAgentMemory is on. */
   agentMemoryStore: z.custom<AgentMemoryStore>().optional(),
+  /** Callback returning initial required todos for the agent. Used by TodoPersistenceMiddleware. */
+  getTodos: z.custom<GetTodosCallback>().optional(),
 });
 
 /** Per-run data passed in graph configurable. Type derived from runContextContextSchema. */
@@ -103,6 +114,7 @@ export function buildRunContext(params: {
   queueKeyPrefix?: string;
   maxHistoryMessages?: number;
   agentMemoryStore?: AgentMemoryStore;
+  getTodos?: GetTodosCallback;
 }): RunContext {
   return {
     job: params.job,
@@ -117,5 +129,6 @@ export function buildRunContext(params: {
     queueKeyPrefix: params.queueKeyPrefix,
     maxHistoryMessages: params.maxHistoryMessages,
     agentMemoryStore: params.agentMemoryStore,
+    getTodos: params.getTodos,
   };
 }

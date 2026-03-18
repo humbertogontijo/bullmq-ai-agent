@@ -3,7 +3,7 @@ import { Job, Worker, WorkerOptions } from "bullmq";
 import type { CompiledGraph } from "../agent/compile.js";
 import { parseTimestampFromJobId, serializeAgentState } from "../agent/middlewares/history.js";
 import { getLastJobAndReturnvalueScript } from "../commands/index.js";
-import type { AgentWorkerLogger, ModelOptions, RedisLike } from "../options.js";
+import type { AgentWorkerLogger, GetTodosCallback, ModelOptions, RedisLike } from "../options.js";
 import type { AgentMemoryStore } from "../memory/AgentMemoryStore.js";
 import { buildRunContext, QUEUE_NAMES } from "../options.js";
 import { buildJobIdPrefix, buildThreadJobsKey } from "../queues/queueKeys.js";
@@ -33,6 +33,8 @@ export interface AgentWorkerParams {
   maxHistoryMessages?: number;
   /** Cross-thread memory store. Set by BullMQAgentWorker when enableAgentMemory is on. */
   agentMemoryStore?: AgentMemoryStore;
+  /** Callback returning initial required todos. Passed to RunContext for the TodoPersistenceMiddleware. */
+  getTodos?: GetTodosCallback;
 }
 
 export class AgentWorker {
@@ -44,6 +46,7 @@ export class AgentWorker {
   private readonly logger: AgentWorkerLogger;
   private readonly maxHistoryMessages: number | undefined;
   private readonly agentMemoryStore: AgentMemoryStore | undefined;
+  private readonly getTodos: GetTodosCallback | undefined;
   private readonly options: WorkerOptions;
   private _started = false;
   private worker: Worker<AgentJobData, AgentJobResult> | null = null;
@@ -57,6 +60,7 @@ export class AgentWorker {
     this.logger = params.logger;
     this.maxHistoryMessages = params.maxHistoryMessages;
     this.agentMemoryStore = params.agentMemoryStore;
+    this.getTodos = params.getTodos;
     this.options = options;
   }
 
@@ -100,6 +104,7 @@ export class AgentWorker {
       queueKeyPrefix: this.queueKeyPrefix,
       maxHistoryMessages: this.maxHistoryMessages,
       agentMemoryStore: this.agentMemoryStore,
+      getTodos: this.getTodos,
     });
 
     let inputStored: StoredAgentState["messages"];
@@ -152,6 +157,7 @@ export class AgentWorker {
       // Middleware hooks receive config.context as runtime.context (LangChain does not pass configurable to runtime).
       context: configurable,
     };
+
     const state: AgentState = await runnable.invoke({ messages }, streamConfig);
     if (!state) {
       return { messages: [] };

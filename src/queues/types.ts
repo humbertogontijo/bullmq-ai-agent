@@ -1,6 +1,11 @@
 import type { AIMessageFields, HumanMessageFields, RemoveMessageFields, SystemMessageFields, ToolMessageFields } from "@langchain/core/messages";
 import { AgentState } from "../agent/state.js";
 
+export interface TodoItem {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+}
+
 export interface StoredToolMessage {
   type: "tool";
   data: ToolMessageFields;

@@ -6,7 +6,7 @@ import { z } from "zod";
 import { getPreviousReturnvaluesScript } from "../../commands/index.js";
 import { QUEUE_NAMES, runContextContextSchema, type RunContext } from "../../options.js";
 import { buildJobIdPrefix, buildThreadJobsKey } from "../../queues/queueKeys.js";
-import type { AgentJobResult, StoredAgentState, StoredMessage } from "../../queues/types.js";
+import type { AgentJobResult, StoredAgentState, StoredMessage, TodoItem } from "../../queues/types.js";
 import { mapChatMessagesToStoredMessages, mapStoredMessagesToChatMessages, REMOVE_ALL_MESSAGES } from "../../utils/messageMapping.js";
 import { AgentState } from "../state.js";
 
@@ -27,21 +27,31 @@ export const DEFAULT_MAX_HISTORY_JOBS = 500;
 /** Minimal Redis interface for loading thread history. Allows mocks in tests. */
 export type RedisWithEval = Pick<Redis, "eval">;
 
+/** Thread history loaded from previous jobs' return values. */
+export interface ThreadHistoryData {
+  messages: StoredMessage[];
+  /** Todos from the most recent previous job (empty when no prior job has todos). */
+  todos: TodoItem[];
+}
+
 /**
- * Load only thread history messages from previous jobs' return values (no input messages).
- * Uses the thread-jobs sorted set (ZRANGEBYSCORE), keyed by threadId only. Used by history middleware in beforeAgent.
- * When maxJobs is set, the Lua script returns at most that many previous jobs; otherwise DEFAULT_MAX_HISTORY_JOBS.
+ * Load thread history from previous jobs' return values.
+ * Returns accumulated messages from all previous jobs and todos from the most
+ * recent job (since todos are replaced wholesale each run).
+ * Uses the thread-jobs sorted set (ZRANGEBYSCORE), keyed by threadId only.
+ * When maxJobs is set, the Lua script returns at most that many previous jobs;
+ * otherwise DEFAULT_MAX_HISTORY_JOBS.
  */
-export async function getThreadHistoryMessages(
+export async function getThreadHistory(
   redis: RedisWithEval,
   threadId: string,
   currentJobId: string,
   queueKeyPrefix: string,
   maxJobs?: number,
-): Promise<StoredMessage[]> {
+): Promise<ThreadHistoryData> {
   const currentTs = parseTimestampFromJobId(currentJobId);
   if (Number.isNaN(currentTs)) {
-    return [];
+    return { messages: [], todos: [] };
   }
   const jobIdPrefix = buildJobIdPrefix(queueKeyPrefix, QUEUE_NAMES.AGENT);
   const threadJobsKey = buildThreadJobsKey(queueKeyPrefix, QUEUE_NAMES.AGENT, threadId);
@@ -55,20 +65,27 @@ export async function getThreadHistoryMessages(
     String(limit)
   )) as (string | null)[];
   const historyMessages: StoredMessage[] = [];
+  let lastTodos: TodoItem[] = [];
   for (const s of raw ?? []) {
     if (!s || s === "") continue;
     try {
       const rv = JSON.parse(s) as AgentJobResult | undefined;
-      if (!rv?.messages || !Array.isArray(rv.messages)) continue;
-      historyMessages.push(...rv.messages);
+      if (!rv) continue;
+      if (rv.messages && Array.isArray(rv.messages)) {
+        historyMessages.push(...rv.messages);
+      }
+      if (rv.todos && Array.isArray(rv.todos)) {
+        lastTodos = rv.todos;
+      }
     } catch {
       // skip malformed returnvalue
     }
   }
-  return historyMessages;
+  return { messages: historyMessages, todos: lastTodos };
 }
 
-/** Serialize one stream state chunk to JSON-safe StoredAgentState (messages only). */
+
+/** Serialize one stream state chunk to JSON-safe StoredAgentState. */
 export function serializeAgentState(state: AgentState): StoredAgentState {
   if (state.__interrupt__ != null && Array.isArray(state.__interrupt__) && state.__interrupt__.length > 0) {
     const [first] = state.__interrupt__;
@@ -77,7 +94,7 @@ export function serializeAgentState(state: AgentState): StoredAgentState {
   }
   const messages = state.messages ?? [];
   const stored = mapChatMessagesToStoredMessages(messages);
-  return { messages: stored };
+  return { messages: stored, todos: state.todos };
 }
 
 /**
@@ -99,6 +116,10 @@ export function createHistoryMiddleware() {
     name: "HistoryMiddleware",
     stateSchema: z.object({
       historyMessages: z.array(z.any()).optional(),
+      todos: z.array(z.object({
+        content: z.string(),
+        status: z.enum(["pending", "in_progress", "completed"]),
+      })).default([]),
     }),
     contextSchema: runContextContextSchema,
     beforeAgent: async (_state, runtime) => {
@@ -111,7 +132,7 @@ export function createHistoryMiddleware() {
       const maxJobs = typeof ctx?.maxHistoryMessages === "number" && ctx.maxHistoryMessages > 0
         ? ctx.maxHistoryMessages
         : undefined;
-      const stored = await getThreadHistoryMessages(
+      const { messages: stored, todos } = await getThreadHistory(
         redis,
         thread_id,
         job.id,
@@ -119,7 +140,7 @@ export function createHistoryMiddleware() {
         maxJobs,
       );
       const historyMessages = mapStoredMessagesToChatMessages(stored);
-      return { historyMessages };
+      return { historyMessages, todos };
     },
     beforeModel: async (state) => {
       const historyMessages = state?.historyMessages ?? [];

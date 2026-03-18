@@ -25,6 +25,7 @@ import { createAgentMemoryMiddleware, type AgentMemoryMiddlewareParams } from ".
 import { createHistoryMiddleware } from "./middlewares/history.js";
 import { createProgressMiddleware } from "./middlewares/progress.js";
 import { createSummarizationMiddleware, type SummarizationMiddlewareParams } from "./middlewares/summarization.js";
+import { createTodoPersistenceMiddleware } from "./middlewares/todos.js";
 import { BASE_PROMPT, RETRIEVE_SYSTEM_PROMPT } from "./prompts.js";
 import { createRetrieveTool } from "./tools/retrieve.js";
 import type { VectorStoreProviderInterface } from "../rag/index.js";
@@ -98,15 +99,13 @@ export function createDeepAgent(
 
   const finalSystemPrompt = buildSystemPrompt(systemPrompt, !!rag);
 
-  const backendFactory: NonNullable<CreateDeepAgentParams["backend"]> =
-    backend ?? defaultBackendFactory;
-
   const agentMemoryMiddlewareArray =
     agentMemory != null ? [createAgentMemoryMiddleware(agentMemory)] : [];
   const summarizationMiddlewareArray =
     summarization != null ? [createSummarizationMiddleware(summarization)] : [];
 
-  const subagentMiddlewareNoFs = [
+  const subagentMiddleware = [
+    createTodoPersistenceMiddleware(),
     todoListMiddleware(),
     anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
     createPatchToolCallsMiddleware(),
@@ -123,8 +122,7 @@ export function createDeepAgent(
     createHistoryMiddleware(),
     ...summarizationMiddlewareArray,
     ...agentMemoryMiddlewareArray,
-    anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
-    createPatchToolCallsMiddleware(),
+    ...subagentMiddleware,
     ...(interruptOn ? [humanInTheLoopMiddleware({ interruptOn })] : []),
     ...customMiddleware,
   ];
@@ -132,13 +130,12 @@ export function createDeepAgent(
   const middleware = subagents.length > 0
     ? baseMiddleware
     : [
-      todoListMiddleware(),
       createSubAgentMiddleware({
         defaultModel: model,
         defaultTools: toolsForSubAgents,
-        defaultMiddleware: subagentMiddlewareNoFs,
-        generalPurposeMiddleware: subagentMiddlewareNoFs,
-        defaultInterruptOn: interruptOn ?? null,
+        defaultMiddleware: subagentMiddleware,
+        generalPurposeMiddleware: subagentMiddleware,
+        defaultInterruptOn: interruptOn,
         subagents: [...subagents],
         generalPurposeAgent: true,
       }),

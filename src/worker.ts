@@ -12,7 +12,7 @@ import type { Subagent } from "./agent/orchestrator.js";
 import { escalateToHuman } from "./agent/tools/escalateToHuman.js";
 import { requestHumanInTheLoop } from "./agent/tools/humanInTheLoop.js";
 import { createSaveMemoryTool, createDeleteMemoryTool } from "./agent/tools/memory.js";
-import { AgentConfig, createDefaultAgentWorkerLogger, type AgentWorkerLogger, type ModelOptions } from "./options.js";
+import { AgentConfig, createDefaultAgentWorkerLogger, type AgentWorkerLogger, type GetTodosCallback, type ModelOptions } from "./options.js";
 import type { AgentMemoryMiddlewareParams } from "./agent/middlewares/agentMemory.js";
 import type { SummarizationMiddlewareParams } from "./agent/middlewares/summarization.js";
 import type { AgentMemoryStore } from "./memory/AgentMemoryStore.js";
@@ -61,6 +61,13 @@ export interface BullMQAgentWorkerOptions extends QueueOptions {
   enableAgentMemory?: boolean | AgentMemoryMiddlewareParams;
   /** Enable history summarization when thread exceeds threshold. When true, uses default options; pass an object to configure historyThreshold. */
   enableSummarization?: boolean | SummarizationMiddlewareParams;
+  /**
+   * Callback that returns initial required todos for the agent before each run.
+   * Receives the job context (agentId, threadId, contactId, metadata) so todos can be
+   * tailored per agent or per thread. The TodoPersistenceMiddleware merges these with
+   * persisted todos from the previous job's return value, adding any missing ones.
+   */
+  getTodos?: GetTodosCallback;
 }
 
 /**
@@ -83,6 +90,7 @@ export class BullMQAgentWorker {
   private readonly agentMemory: AgentMemoryMiddlewareParams | undefined;
   private readonly customAgentMemoryStore: AgentMemoryStore | undefined;
   private readonly summarization: SummarizationMiddlewareParams | undefined;
+  private readonly getTodos: GetTodosCallback | undefined;
 
   private agentWorker: AgentWorker | null = null;
   private ingestWorker: IngestWorker | null = null;
@@ -91,7 +99,7 @@ export class BullMQAgentWorker {
   private documentRedisConnection: RedisConnection | null = null;
 
   constructor(options: BullMQAgentWorkerOptions) {
-    const { documentConnection, connection, chatModelOptions, subagents, systemPrompt, getAgentConfig, embeddingModelOptions, logger, maxHistoryMessages, tools: customTools, enableAgentMemory, agentMemoryStore, enableSummarization, vectorStoreProvider, ...bullOptions } = options;
+    const { documentConnection, connection, chatModelOptions, subagents, systemPrompt, getAgentConfig, embeddingModelOptions, logger, maxHistoryMessages, tools: customTools, enableAgentMemory, agentMemoryStore, enableSummarization, vectorStoreProvider, getTodos, ...bullOptions } = options;
     this.connection = connection;
     this.documentConnection = documentConnection;
     this.vectorStoreProvider = vectorStoreProvider;
@@ -110,6 +118,7 @@ export class BullMQAgentWorker {
     this.summarization = enableSummarization
       ? (typeof enableSummarization === "object" ? enableSummarization : {})
       : undefined;
+    this.getTodos = getTodos;
     this.options = bullOptions;
   }
 
@@ -177,6 +186,7 @@ export class BullMQAgentWorker {
         logger: this.logger,
         maxHistoryMessages: this.maxHistoryMessages,
         agentMemoryStore: memoryStore,
+        getTodos: this.getTodos,
       },
       queueOptions
     );

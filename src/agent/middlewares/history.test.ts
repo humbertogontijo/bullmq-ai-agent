@@ -4,7 +4,7 @@ import { RemoveMessage } from "@langchain/core/messages";
 import {
   createHistoryMiddleware,
   parseTimestampFromJobId,
-  getThreadHistoryMessages,
+  getThreadHistory,
   serializeAgentState,
 } from "./history.js";
 import type { AgentState } from "../state.js";
@@ -68,13 +68,13 @@ describe("createHistoryMiddleware beforeAgent", () => {
   });
 });
 
-describe("getThreadHistoryMessages", () => {
+describe("getThreadHistory", () => {
   beforeEach(() => {
     mockEvalFn.mockResolvedValue([]);
   });
 
   it("calls eval with thread-jobs key (threadId only), current_ts, prefix, and max jobs (default 500)", async () => {
-    await getThreadHistoryMessages(
+    await getThreadHistory(
       mockRedis,
       "t1",
       "t1/300",
@@ -91,7 +91,7 @@ describe("getThreadHistoryMessages", () => {
   });
 
   it("calls eval with custom maxJobs when provided", async () => {
-    await getThreadHistoryMessages(
+    await getThreadHistory(
       mockRedis,
       "t1",
       "t1/300",

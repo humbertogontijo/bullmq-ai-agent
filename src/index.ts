@@ -32,7 +32,7 @@ export { BullMQAgentWorker } from "./worker.js";
 export type { BullMQAgentWorkerOptions } from "./worker.js";
 
 export { createDefaultAgentWorkerLogger, QUEUE_NAMES, runContextContextSchema } from "./options.js";
-export type { AgentWorkerLogger, ModelOptions, RunContext } from "./options.js";
+export type { AgentWorkerLogger, GetTodosCallback, ModelOptions, RunContext } from "./options.js";
 
 export { SystemPromptBuilder, ToolDescriptionBuilder } from "./agent/promptBuilders.js";
 export type { ToolExample } from "./agent/promptBuilders.js";
@@ -41,10 +41,11 @@ export type { Subagent } from "./agent/orchestrator.js";
 export {
   createHistoryMiddleware,
   DEFAULT_MAX_HISTORY_JOBS,
-  getThreadHistoryMessages,
+  getThreadHistory,
   parseTimestampFromJobId,
   serializeAgentState,
 } from "./agent/middlewares/history.js";
+export type { ThreadHistoryData } from "./agent/middlewares/history.js";
 export { createProgressMiddleware } from "./agent/middlewares/progress.js";
 export type { ProgressPayload, ProgressStage } from "./agent/middlewares/progress.js";
 export {
@@ -56,7 +57,7 @@ export type { AgentConfig } from "./options.js";
 export { createAgentQueue } from "./queues/agentQueue.js";
 export { createIngestQueue } from "./queues/ingestQueue.js";
 export { createSearchQueue } from "./queues/searchQueue.js";
-export type { AgentJobResult, StoredAgentState, IngestJobResult, SearchJobResult, StoredMessage } from "./queues/types.js";
+export type { AgentJobResult, StoredAgentState, IngestJobResult, SearchJobResult, StoredMessage, TodoItem } from "./queues/types.js";
 export { getLastRequestHumanApprovalToolCall, isResumeRequired } from "./utils/message.js";
 export {
   mapChatMessagesToStoredMessages,
@@ -86,6 +87,7 @@ export {
   createAgentMemoryMiddleware,
 } from "./agent/middlewares/agentMemory.js";
 export type { AgentMemoryMiddlewareParams } from "./agent/middlewares/agentMemory.js";
+export { createTodoPersistenceMiddleware } from "./agent/middlewares/todos.js";
 
 // LangChain re-exports for convenience
 export { HumanMessage, SystemMessage } from "@langchain/core/messages";
