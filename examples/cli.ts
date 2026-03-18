@@ -8,7 +8,7 @@ import * as clack from "@clack/prompts";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { MessageRole } from "bullmq-ai-agent";
+import type { MessageRole, TodoItem } from "bullmq-ai-agent";
 import { BullMQAgentClient, BullMQAgentWorker, isResumeRequired } from "bullmq-ai-agent";
 import type { ModelOptions } from "bullmq-ai-agent";
 import type { AgentJobResult, StoredAgentState, StoredMessage } from "bullmq-ai-agent";
@@ -82,8 +82,11 @@ const defaultOptions = {
  * Start all workers (agent, tools, subagents, ingest). Pass chatModelOptions and embeddingModelOptions (e.g. from getModelOptions(apiKey)).
  * Use env for connection and queue names.
  */
-export async function startWorkers(modelOptions: { chatModelOptions: ModelOptions; embeddingModelOptions: ModelOptions }): Promise<BullMQAgentWorker> {
-  const workers = new BullMQAgentWorker({ ...defaultOptions, ...modelOptions, enableAgentMemory: true });
+export async function startWorkers(
+  modelOptions: { chatModelOptions: ModelOptions; embeddingModelOptions: ModelOptions },
+  options?: { getTodos?: (ctx: { agentId: string; threadId: string }) => TodoItem[] | Promise<TodoItem[]> },
+): Promise<BullMQAgentWorker> {
+  const workers = new BullMQAgentWorker({ ...defaultOptions, ...modelOptions, enableAgentMemory: true, getTodos: options?.getTodos });
   await workers.start();
   return workers;
 }
@@ -103,6 +106,20 @@ function getLastMessageFromChunk(chunk: StoredAgentState): string | undefined {
     }
   }
   return undefined;
+}
+
+/** Log todos (content + status + fulfillment when present) to the console. */
+function logTodos(todos: TodoItem[]): void {
+  if (!todos?.length) return;
+  clack.log.message("Todos:");
+  for (let i = 0; i < todos.length; i++) {
+    const t = todos[i];
+    const line =
+      t.status === "completed" && t.fulfillment !== ""
+        ? `  ${i + 1}. [${t.status}] ${t.content} → ${t.fulfillment}`
+        : `  ${i + 1}. [${t.status}] ${t.content}`;
+    clack.log.message(line);
+  }
 }
 
 /** Get human-in-the-loop prompt from last AI message tool call (e.g. request_human_approval reason). */
@@ -133,24 +150,20 @@ function orExit<T>(value: T | symbol): T {
 async function runTurn(
   client: BullMQAgentClient,
   _modelOptions: { chatModelOptions: ModelOptions; embeddingModelOptions: ModelOptions },
-  history: Array<{ role: MessageRole; content: string }>,
-  userInput: string
-): Promise<{ lastMessage: string | undefined; done: boolean }> {
-  history.push({ role: "user", content: userInput });
-
+  userInput: string,
+  threadId: string = SESSION_ID
+): Promise<{ lastMessage?: string; todos?: TodoItem[]; done: boolean }> {
   const agentId = "default";
-  const threadId = SESSION_ID;
-  const messages = toStoredMessages([...history]);
+  const messages = toStoredMessages([{ role: "user", content: userInput }]);
   const runResult = await client.run(agentId, threadId, { messages, ttl: WAIT_TTL });
-  let result = await runResult.promise;
+  let result: AgentJobResult = await runResult.promise;
 
   if (isFallbackResult(result)) {
-    return { lastMessage: undefined, done: true };
+    return { done: true };
   }
 
-  let chunk = isFallbackResult(result) ? undefined : (result as AgentJobResult);
-  while (chunk && isResumeRequired(chunk)) {
-    const prompt = getHumanPromptFromChunk(chunk);
+  while (result && isResumeRequired(result)) {
+    const prompt = getHumanPromptFromChunk(result);
     const humanInput = orExit(
       await clack.text({
         message: `[Human-in-the-loop] ${prompt}`,
@@ -160,20 +173,15 @@ async function runTurn(
     const resumeResult = await client.resumeTool(agentId, threadId, { content: humanInput, ttl: WAIT_TTL });
     result = await resumeResult.promise;
     if (isFallbackResult(result)) {
-      return { lastMessage: undefined, done: true };
+      return { done: true };
     }
-    chunk = result as AgentJobResult;
   }
 
-  const lastMessage = chunk ? getLastMessageFromChunk(chunk) : undefined;
-  if (lastMessage) {
-    history.push({ role: "assistant", content: lastMessage });
-  }
-  return { lastMessage, done: true };
+  const lastMessage = result ? getLastMessageFromChunk(result) : undefined;
+  return { lastMessage, todos: result?.todos, done: true };
 }
 
 async function flowBasicChat(client: BullMQAgentClient, modelOptions: { chatModelOptions: ModelOptions; embeddingModelOptions: ModelOptions }): Promise<void> {
-  const history: Array<{ role: MessageRole; content: string }> = [];
   clack.note("Chat with the agent. You'll be prompted for each message. Choose 'Back to menu' to exit this mode.", "Basic chat");
 
   while (true) {
@@ -186,7 +194,7 @@ async function flowBasicChat(client: BullMQAgentClient, modelOptions: { chatMode
     if (!input.trim()) continue;
 
     try {
-      const { lastMessage } = await runTurn(client, modelOptions, history, input);
+      const { lastMessage } = await runTurn(client, modelOptions, input);
       if (lastMessage) clack.note(lastMessage, "Assistant");
     } catch (err) {
       clack.log.error(String(err));
@@ -226,7 +234,6 @@ async function flowRag(client: BullMQAgentClient, modelOptions: { chatModelOptio
     }
   }
 
-  const history: Array<{ role: MessageRole; content: string }> = [];
   while (true) {
     const question = orExit(
       await clack.text({
@@ -237,7 +244,7 @@ async function flowRag(client: BullMQAgentClient, modelOptions: { chatModelOptio
     if (!question.trim()) continue;
 
     try {
-      const { lastMessage } = await runTurn(client, modelOptions, history, question);
+      const { lastMessage } = await runTurn(client, modelOptions, question);
       if (lastMessage) clack.note(lastMessage, "Assistant");
     } catch (err) {
       clack.log.error(String(err));
@@ -253,10 +260,9 @@ async function flowHumanInTheLoop(client: BullMQAgentClient, modelOptions: { cha
 
   const message =
     "Before you answer, use the request_human_approval tool to ask: 'Do you allow me to proceed?' Then say hello.";
-  const history: Array<{ role: MessageRole; content: string }> = [];
 
   try {
-    const { lastMessage } = await runTurn(client, modelOptions, history, message);
+    const { lastMessage } = await runTurn(client, modelOptions, message);
     if (lastMessage) clack.note(lastMessage, "Assistant");
   } catch (err) {
     clack.log.error(String(err));
@@ -319,6 +325,50 @@ async function flowMemory(client: BullMQAgentClient, modelOptions: { chatModelOp
   }
 }
 
+async function flowTodos(client: BullMQAgentClient, modelOptions: { chatModelOptions: ModelOptions; embeddingModelOptions: ModelOptions }): Promise<void> {
+  clack.note(
+    "Todos guide the agent through a checklist. The agent sees the todos and works through them step by step.\n" +
+    "On subsequent runs in the same thread, persisted todos are loaded from the previous job and new required todos are merged in.",
+    "Todos"
+  );
+
+  const threadId = `todos-thread-${Date.now()}`;
+
+  // First turn: the agent receives the todos and starts working through them
+  const firstMsg = "Hi! Please work through the todo list.";
+  clack.log.message("Sending first message — agent will see the seeded todos...");
+  try {
+    const { lastMessage, todos } = await runTurn(client, modelOptions, firstMsg, threadId);
+    if (todos?.length) logTodos(todos);
+    if (lastMessage) clack.note(lastMessage, "Assistant");
+  } catch (err) {
+    clack.log.error(String(err));
+    return;
+  }
+
+  // Continue chatting in the same thread so the agent can keep progressing
+  while (true) {
+    const again = orExit(await clack.confirm({ message: "Continue in this thread?" }));
+    if (!again) break;
+
+    const input = orExit(
+      await clack.text({
+        message: "Your message",
+        placeholder: "Provide info the agent needs, or ask it to continue...",
+      })
+    );
+    if (!input.trim()) continue;
+
+    try {
+      const { lastMessage, todos } = await runTurn(client, modelOptions, input, threadId);
+      if (todos?.length) logTodos(todos);
+      if (lastMessage) clack.note(lastMessage, "Assistant");
+    } catch (err) {
+      clack.log.error(String(err));
+    }
+  }
+}
+
 async function main(): Promise<void> {
   const scriptPath = fileURLToPath(import.meta.url);
   const isRunDirectly = process.argv[1] === scriptPath || process.argv[1]?.endsWith("cli.ts") || process.argv[1]?.endsWith("cli.js");
@@ -329,7 +379,17 @@ async function main(): Promise<void> {
   const apiKey = await ensureOpenAIKey();
   const modelOptions = getModelOptions(apiKey);
 
-  const workers = await startWorkers(modelOptions);
+  const workers = await startWorkers(modelOptions, {
+    getTodos: ({ threadId }) => {
+      if (!threadId.startsWith("todos-thread-")) return [];
+      return [
+        { content: "Get the client's full name", status: "pending" as const, fulfillment: "" },
+        { content: "Get the client's email address", status: "pending" as const, fulfillment: "" },
+        { content: "Get the client's shipping address", status: "pending" as const, fulfillment: "" },
+        { content: "Confirm all details with the client", status: "pending" as const, fulfillment: "" },
+      ];
+    },
+  });
   const client = new BullMQAgentClient({ ...defaultOptions });
 
   try {
@@ -342,6 +402,7 @@ async function main(): Promise<void> {
             { value: "rag", label: "RAG", hint: "Ingest + ask questions with retrieve" },
             { value: "hitl", label: "Human-in-the-loop", hint: "Request approval then resume" },
             { value: "memory", label: "Memory", hint: "Cross-thread memory: remember facts across conversations" },
+            { value: "todos", label: "Todos", hint: "Guide the agent with a seeded todo checklist" },
             { value: "exit", label: "Exit" },
           ],
         })
@@ -361,6 +422,9 @@ async function main(): Promise<void> {
           break;
         case "memory":
           await flowMemory(client, modelOptions);
+          break;
+        case "todos":
+          await flowTodos(client, modelOptions);
           break;
       }
     }

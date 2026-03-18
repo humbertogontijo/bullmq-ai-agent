@@ -4,6 +4,8 @@ import { AgentState } from "../agent/state.js";
 export interface TodoItem {
   content: string;
   status: "pending" | "in_progress" | "completed";
+  /** When status is "completed", the actual result or answer (e.g. the client's full name value). Use empty string when there is no concrete result to store. */
+  fulfillment: string;
 }
 
 export interface StoredToolMessage {

@@ -119,6 +119,7 @@ export function createHistoryMiddleware() {
       todos: z.array(z.object({
         content: z.string(),
         status: z.enum(["pending", "in_progress", "completed"]),
+        fulfillment: z.string(),
       })).default([]),
     }),
     contextSchema: runContextContextSchema,

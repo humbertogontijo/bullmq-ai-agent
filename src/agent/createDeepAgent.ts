@@ -8,7 +8,7 @@
  * helper does not add any filesystem middleware, so no file tools are exposed
  * at all.
  */
-import type { CompiledSubAgent, CreateDeepAgentParams } from "deepagents";
+import type { CreateDeepAgentParams } from "deepagents";
 import {
   createPatchToolCallsMiddleware,
   createSubAgentMiddleware,
@@ -19,16 +19,15 @@ import {
   createAgent,
   humanInTheLoopMiddleware,
   SystemMessage,
-  todoListMiddleware,
 } from "langchain";
+import type { VectorStoreProviderInterface } from "../rag/index.js";
 import { createAgentMemoryMiddleware, type AgentMemoryMiddlewareParams } from "./middlewares/agentMemory.js";
 import { createHistoryMiddleware } from "./middlewares/history.js";
 import { createProgressMiddleware } from "./middlewares/progress.js";
 import { createSummarizationMiddleware, type SummarizationMiddlewareParams } from "./middlewares/summarization.js";
-import { createTodoPersistenceMiddleware } from "./middlewares/todos.js";
+import { createTodoListMiddleware } from "./middlewares/todos.js";
 import { BASE_PROMPT, RETRIEVE_SYSTEM_PROMPT } from "./prompts.js";
 import { createRetrieveTool } from "./tools/retrieve.js";
-import type { VectorStoreProviderInterface } from "../rag/index.js";
 
 /** Config passed to backend factories; matches CreateDeepAgentParams["backend"] callback argument. */
 type BackendConfig = Parameters<Extract<NonNullable<CreateDeepAgentParams["backend"]>, Function>>[0];
@@ -105,13 +104,12 @@ export function createDeepAgent(
     summarization != null ? [createSummarizationMiddleware(summarization)] : [];
 
   const subagentMiddleware = [
-    createTodoPersistenceMiddleware(),
-    todoListMiddleware(),
+    createTodoListMiddleware(),
     anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
     createPatchToolCallsMiddleware(),
   ];
 
-  const toolsList = tools ? [...tools] : [];
+  const toolsList = tools ? [...tools] : []
   if (rag) {
     toolsList.unshift(createRetrieveTool(rag.vectorStoreProvider));
   }

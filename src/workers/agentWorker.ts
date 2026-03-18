@@ -176,7 +176,8 @@ export class AgentWorker {
       // Exclude system messages from the stored state so they are not persisted in job history.
       messages: (state.messages ?? []).filter(
         (m) => !SystemMessage.isInstance(m)
-      )
+      ),
+      todos: state.todos,
     });
   }
 

@@ -87,7 +87,7 @@ export {
   createAgentMemoryMiddleware,
 } from "./agent/middlewares/agentMemory.js";
 export type { AgentMemoryMiddlewareParams } from "./agent/middlewares/agentMemory.js";
-export { createTodoPersistenceMiddleware } from "./agent/middlewares/todos.js";
+export { createTodoListMiddleware } from "./agent/middlewares/todos.js";
 
 // LangChain re-exports for convenience
 export { HumanMessage, SystemMessage } from "@langchain/core/messages";
