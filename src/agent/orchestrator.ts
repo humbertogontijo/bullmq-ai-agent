@@ -1,12 +1,9 @@
-import type { BaseCheckpointSaver } from "@langchain/langgraph-checkpoint";
 import type { SystemMessageFields } from "@langchain/core/messages";
 import type { StructuredToolInterface } from "@langchain/core/tools";
 import { CompiledSubAgent } from "deepagents";
 import { initChatModel, SystemMessage } from "langchain";
 import type { AgentConfig, ModelOptions, Skill } from "../options.js";
 import { createDeepAgent } from "./createDeepAgent.js";
-import { createHistoryMiddleware } from "./middlewares/history.js";
-import { createProgressMiddleware } from "./middlewares/progress.js";
 import { createSummarizationMiddleware } from "./middlewares/summarization.js";
 
 type TRunnable = Awaited<ReturnType<typeof createRunnable>>
@@ -60,7 +57,7 @@ async function createRunnable(
       model: chaModel,
       tools: [...tools, ...(subagent.tools ?? [])],
       systemPrompt: new SystemMessage(subagent.systemPrompt),
-      middleware: [createProgressMiddleware(), createHistoryMiddleware(), createSummarizationMiddleware()]
+      middleware: [createSummarizationMiddleware()],
     });
     return {
       name: subagent.name,
@@ -83,7 +80,7 @@ async function createRunnable(
     tools,
     systemPrompt: systemPrompt ? new SystemMessage(systemPrompt) : "",
     subagents: compiledSubagents,
-    middleware: [createProgressMiddleware(), createHistoryMiddleware(), createSummarizationMiddleware()]
+    middleware: [createSummarizationMiddleware()]
   });
 }
 

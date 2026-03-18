@@ -25,6 +25,8 @@ import {
   createMemoryMiddleware,
 } from "deepagents";
 import { BASE_PROMPT } from "./prompts.js";
+import { createProgressMiddleware } from "./middlewares/progress.js";
+import { createHistoryMiddleware } from "./middlewares/history.js";
 
 /** Subagent type: either a spec (SubAgent) or a pre-compiled runnable (CompiledSubAgent). */
 type SubAgentOrCompiled = SubAgent | CompiledSubAgent;
@@ -128,31 +130,41 @@ export function createDeepAgent(
   const toolsList = tools ? [...tools] : [];
   const toolsForSubAgents = toolsList as Parameters<typeof createSubAgentMiddleware>[0]["defaultTools"];
 
+  const baseMiddleware = [
+    createProgressMiddleware(),
+    createHistoryMiddleware(),
+    anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
+    createPatchToolCallsMiddleware(),
+    ...skillsMiddlewareArray,
+    ...memoryMiddlewareArray,
+    ...(interruptOn ? [humanInTheLoopMiddleware({ interruptOn })] : []),
+    ...customMiddleware,
+  ];
+
+  const middleware = subagents.length > 0
+    ? baseMiddleware
+    : [
+        todoListMiddleware(),
+        createSubAgentMiddleware({
+          defaultModel: model,
+          defaultTools: toolsForSubAgents,
+          defaultMiddleware: subagentMiddlewareNoFs,
+          generalPurposeMiddleware: [
+            ...subagentMiddlewareNoFs,
+            ...skillsMiddlewareArray,
+          ],
+          defaultInterruptOn: interruptOn ?? null,
+          subagents: processedSubagents,
+          generalPurposeAgent: true,
+        }),
+        ...baseMiddleware,
+      ];
+
   return createAgent({
     model,
     systemPrompt: finalSystemPrompt,
     tools: toolsList,
-    middleware: [
-      todoListMiddleware(),
-      createSubAgentMiddleware({
-        defaultModel: model,
-        defaultTools: toolsForSubAgents,
-        defaultMiddleware: subagentMiddlewareNoFs,
-        generalPurposeMiddleware: [
-          ...subagentMiddlewareNoFs,
-          ...skillsMiddlewareArray,
-        ],
-        defaultInterruptOn: interruptOn ?? null,
-        subagents: processedSubagents,
-        generalPurposeAgent: true,
-      }),
-      anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
-      createPatchToolCallsMiddleware(),
-      ...skillsMiddlewareArray,
-      ...memoryMiddlewareArray,
-      ...(interruptOn ? [humanInTheLoopMiddleware({ interruptOn })] : []),
-      ...customMiddleware,
-    ],
+    middleware,
     ...(responseFormat != null && { responseFormat }),
     contextSchema,
     store,
