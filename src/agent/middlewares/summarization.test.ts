@@ -143,20 +143,14 @@ describe("createSummarizationMiddleware", () => {
     expect(mockInvoke).toHaveBeenCalledTimes(1);
     const messages = mockInvoke.mock.calls[0][0];
     expect(Array.isArray(messages)).toBe(true);
-    // [system, human prompt, ...historyMessages]
-    expect(messages).toHaveLength(4);
-    expect(messages[0]).toBeInstanceOf(SystemMessage);
-    const m1 = messages[1];
-    const m2 = messages[2];
-    const m3 = messages[3];
-    expect(HumanMessage.isInstance(m1)).toBe(true);
-    expect(HumanMessage.isInstance(m2)).toBe(true);
-    expect(HumanMessage.isInstance(m3)).toBe(true);
-    if (HumanMessage.isInstance(m1) && HumanMessage.isInstance(m2) && HumanMessage.isInstance(m3)) {
-      expect(String(m1.content)).toContain("Summarize the following conversation");
-      expect(String(m2.content)).toBe("What is the weather?");
-      expect(String(m3.content)).toBe("Tell me more about that.");
-    }
+    // Single HumanMessage with LangChain-style template (prompt with {messages} replaced by getBufferString)
+    expect(messages).toHaveLength(1);
+    expect(HumanMessage.isInstance(messages[0])).toBe(true);
+    const promptContent = String((messages[0] as InstanceType<typeof HumanMessage>).content);
+    expect(promptContent).toContain("Context Extraction Assistant");
+    expect(promptContent).toContain("Messages to summarize:");
+    expect(promptContent).toContain("What is the weather?");
+    expect(promptContent).toContain("Tell me more about that.");
 
     expect(mockEval).toHaveBeenCalledTimes(1);
     expect(mockEval).toHaveBeenCalledWith(
@@ -171,7 +165,7 @@ describe("createSummarizationMiddleware", () => {
     expect(result?.messages).toHaveLength(2);
     expect(RemoveMessage.isInstance(result?.messages?.[0])).toBe(true);
     expect(result?.messages?.[1]).toEqual(
-      new SystemMessage("[Previous conversation summary]\nFake summary of the conversation.")
+      new SystemMessage("Here is a summary of the conversation to date:\nFake summary of the conversation.")
     );
   });
 

@@ -1,5 +1,5 @@
 import type { BaseMessage } from "@langchain/core/messages";
-import { HumanMessage, RemoveMessage, SystemMessage } from "@langchain/core/messages";
+import { getBufferString, HumanMessage, RemoveMessage, SystemMessage } from "@langchain/core/messages";
 import { createMiddleware, initChatModel } from "langchain";
 import { z } from "zod";
 import { clearThreadJobsAndRemoveJobsScript } from "../../commands/index.js";
@@ -12,8 +12,7 @@ import {
 import { REMOVE_ALL_MESSAGES } from "../../utils/messageMapping.js";
 import {
   formatPreviousConversationSummary,
-  SUMMARIZATION_SYSTEM_MESSAGE,
-  SUMMARIZATION_USER_PROMPT,
+  SUMMARIZATION_PROMPT_TEMPLATE,
 } from "../prompts.js";
 
 
@@ -69,11 +68,12 @@ export function createSummarizationMiddleware(params: SummarizationMiddlewarePar
           maxTokens: 2048,
         }
       );
-      const response = await model.invoke([
-        new SystemMessage(SUMMARIZATION_SYSTEM_MESSAGE),
-        new HumanMessage(SUMMARIZATION_USER_PROMPT),
-        ...historyMessages
-      ]);
+      const formattedMessages = getBufferString(historyMessages);
+      const formattedPrompt = SUMMARIZATION_PROMPT_TEMPLATE.replace(
+        "{messages}",
+        formattedMessages
+      );
+      const response = await model.invoke([new HumanMessage(formattedPrompt)]);
       const content = (response as { content?: string })?.content;
       const summary = typeof content === "string" ? content : String(content ?? "");
 
