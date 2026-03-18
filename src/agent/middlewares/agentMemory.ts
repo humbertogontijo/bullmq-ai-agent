@@ -3,7 +3,7 @@ import { createMiddleware } from "langchain";
 import { z } from "zod";
 import { runContextContextSchema, type RunContext } from "../../options.js";
 import { DEFAULT_SEARCH_LIMIT, buildMemoryNamespace, buildContactMemoryNamespace } from "../../memory/AgentMemoryStore.js";
-import { AGENT_MEMORY_SYSTEM_PROMPT, formatMemoryScopeContents } from "../prompts.js";
+import { AGENT_MEMORY_SYSTEM_PROMPT_BUILDER, formatMemoryScopeContents } from "../prompts.js";
 import { REMOVE_ALL_MESSAGES } from "../../utils/messageMapping.js";
 
 export interface AgentMemoryMiddlewareParams {
@@ -58,9 +58,10 @@ export function createAgentMemoryMiddleware(params: AgentMemoryMiddlewareParams 
         store.search(contactNs, { limit: maxMemories }),
       ]);
 
-      const text = AGENT_MEMORY_SYSTEM_PROMPT
-        .replace("{agent_memory_contents}", formatMemoryScopeContents(agentItems))
-        .replace("{contact_memory_contents}", formatMemoryScopeContents(contactItems));
+      const text = AGENT_MEMORY_SYSTEM_PROMPT_BUILDER.build({
+        agent_memory_contents: formatMemoryScopeContents(agentItems),
+        contact_memory_contents: formatMemoryScopeContents(contactItems),
+      });
 
       const memoryMessage = new SystemMessage(text);
       return { agentMemoryMessages: [memoryMessage] };

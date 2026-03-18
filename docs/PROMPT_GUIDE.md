@@ -49,6 +49,27 @@ Support assistant for Acme Corp. Be concise and professional.
 - **String**: Pass any string; it will be merged with the base prompt.
 - **SystemMessage**: You can pass a `SystemMessage` (e.g. with multi-block content) for full control; the base prompt is still prepended.
 
+### Using the SystemPromptBuilder
+
+The library exports a fluent builder so you can build system prompts without hand-writing XML:
+
+```ts
+import { SystemPromptBuilder } from "bullmq-ai-agent";
+
+const systemPrompt = new SystemPromptBuilder()
+  .role("Support assistant for Acme Corp. Be concise and professional.")
+  .instructions(
+    "Answer only about Acme products and policies. Say \"I can only help with Acme topics\" for off-topic requests.",
+    "Prefer short answers; link to docs when relevant.",
+  )
+  .constraints("Never share internal pricing with competitors.")
+  .build();
+```
+
+Available methods: `.role()`, `.instructions()`, `.objective()`, `.constraints()`, `.examples()`, `.section(tag, content)` for custom XML sections, and `.build()`.
+
+**Templates:** You can put placeholders like `{name}` in any section content. Call `.build(params)` with a record of placeholder names to values; each `{key}` is replaced by `params[key]` (missing keys are left as-is). Example: `.section("messages", "Content:\n{messages}").build({ messages: "..." })`.
+
 ---
 
 ## 2. Tool descriptions
@@ -82,6 +103,29 @@ Hand off the conversation to a human agent. Use when the user should be routed t
 ```
 
 Tool descriptions are static text; no placeholders or variables.
+
+### Using the ToolDescriptionBuilder
+
+The library exports a fluent builder for tool descriptions:
+
+```ts
+import { ToolDescriptionBuilder } from "bullmq-ai-agent";
+
+const description = new ToolDescriptionBuilder()
+  .intro("Hand off the conversation to a human agent. Use when the user should be routed to a human and the agent should not continue.")
+  .whenToUse(
+    "Complaints or sensitive issues that require human handling",
+    "Requests that are out of scope for the agent",
+    "User explicitly asks to speak to a human",
+  )
+  .whenNotToUse(
+    "For simple approval or confirmation: use request_human_approval instead so the agent can resume after the user responds.",
+    "For routine questions the agent can answer.",
+  )
+  .build();
+```
+
+Available methods: `.intro()`, `.whenToUse()`, `.whenNotToUse()`, `.howToUse()`, `.example(scenario, reasoning)`, `.section(heading, lines)` for extra sections (e.g. "Scopes"), and `.build()`.
 
 ---
 

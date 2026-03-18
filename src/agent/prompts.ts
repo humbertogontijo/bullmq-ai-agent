@@ -1,52 +1,42 @@
 /**
  * Centralized prompts used by the agent, middlewares, and compile.
- * Aligned with LangChain style: XML-style tags (<role>, <instructions>) and ## sections
- * where applicable (e.g. summarization from langchain/dist/agents/middleware/summarization).
+ * Aligned with docs/PROMPT_GUIDE.md: XML-style tags and ## sections; built via promptBuilders.
  */
 
-/** Base system prompt for the deep agent (tool access instruction). */
-export const BASE_PROMPT = `<role>
-Assistant with access to tools
-</role>
+import { SystemPromptBuilder, ToolDescriptionBuilder } from "./promptBuilders.js";
 
-<instructions>
-You have access to standard tools. Use them to complete the user's request.
-</instructions>`;
+/** Base system prompt for the deep agent (tool access instruction). */
+export const BASE_PROMPT = new SystemPromptBuilder()
+  .role("Assistant with access to tools")
+  .instructions("You have access to standard tools. Use them to complete the user's request.")
+  .build();
 
 // --- Summarization (from LangChain summarization middleware) ---
 
 /**
- * Prompt template for the summarization model. Contains a single placeholder {messages}
- * that must be replaced with the formatted conversation history (e.g. via getBufferString).
+ * System prompt builder for the summarization model. Use .build({ messages }) with the
+ * formatted conversation history (e.g. via getBufferString).
  * @see node_modules/langchain/dist/agents/middleware/summarization.js DEFAULT_SUMMARY_PROMPT
  */
-export const SUMMARIZATION_PROMPT_TEMPLATE = `<role>
-Context Extraction Assistant
-</role>
-
-<primary_objective>
-Your sole objective in this task is to extract the highest quality/most relevant context from the conversation history below.
-</primary_objective>
-
-<objective_information>
-You're nearing the total number of input tokens you can accept, so you must extract the highest quality/most relevant pieces of information from your conversation history.
-This context will then overwrite the conversation history presented below. Because of this, ensure the context you extract is only the most important information to your overall goal.
-</objective_information>
-
-<instructions>
-The conversation history below will be replaced with the context you extract in this step. Because of this, you must do your very best to extract and record all of the most important context from the conversation history.
-You want to ensure that you don't repeat any actions you've already completed, so the context you extract from the conversation history should be focused on the most important information to your overall goal.
-</instructions>
-
-The user will message you with the full message history you'll be extracting context from, to then replace. Carefully read over it all, and think deeply about what information is most important to your overall goal that should be saved:
-
-With all of this in mind, please carefully read over the entire conversation history, and extract the most important and relevant context to replace it so that you can free up space in the conversation history.
-Respond ONLY with the extracted context. Do not include any additional information, or text before or after the extracted context.
-
-<messages>
-Messages to summarize:
-{messages}
-</messages>`;
+export const SUMMARIZATION_PROMPT_BUILDER = new SystemPromptBuilder()
+  .role("Context Extraction Assistant")
+  .section(
+    "primary_objective",
+    "Your sole objective in this task is to extract the highest quality/most relevant context from the conversation history below.",
+  )
+  .section(
+    "objective_information",
+    "You're nearing the total number of input tokens you can accept, so you must extract the highest quality/most relevant pieces of information from your conversation history.\nThis context will then overwrite the conversation history presented below. Because of this, ensure the context you extract is only the most important information to your overall goal.",
+  )
+  .instructions(
+    "The conversation history below will be replaced with the context you extract in this step. Because of this, you must do your very best to extract and record all of the most important context from the conversation history.",
+    "You want to ensure that you don't repeat any actions you've already completed, so the context you extract from the conversation history should be focused on the most important information to your overall goal.",
+  )
+  .section(
+    "task",
+    "The user will message you with the full message history you'll be extracting context from, to then replace. Carefully read over it all, and think deeply about what information is most important to your overall goal that should be saved:\n\nWith all of this in mind, please carefully read over the entire conversation history, and extract the most important and relevant context to replace it so that you can free up space in the conversation history.\nRespond ONLY with the extracted context. Do not include any additional information, or text before or after the extracted context.",
+  )
+  .section("messages", "Messages to summarize:\n{messages}");
 
 /**
  * Prefix for the system message that carries the previous conversation summary.
@@ -87,32 +77,40 @@ ${skillNames.join(", ")}`;
 
 // --- Tool: escalate_to_human ---
 
-export const ESCALATE_TO_HUMAN_TOOL_DESCRIPTION = `Hand off the conversation to a human agent. Use when the user should be routed to a human and the agent should not continue.
-
-## When to Use This Tool
-- Complaints or sensitive issues that require human handling
-- Requests that are out of scope for the agent
-- Complex or ambiguous situations where human judgment is needed
-- User explicitly asks to speak to a human
-
-## When NOT to Use This Tool
-- For simple approval or confirmation: use \`request_human_approval\` instead so the agent can resume after the user responds.
-- For routine questions the agent can answer.`;
+export const ESCALATE_TO_HUMAN_TOOL_DESCRIPTION = new ToolDescriptionBuilder()
+  .intro(
+    "Hand off the conversation to a human agent. Use when the user should be routed to a human and the agent should not continue.",
+  )
+  .whenToUse(
+    "Complaints or sensitive issues that require human handling",
+    "Requests that are out of scope for the agent",
+    "Complex or ambiguous situations where human judgment is needed",
+    "User explicitly asks to speak to a human",
+  )
+  .whenNotToUse(
+    "For simple approval or confirmation: use `request_human_approval` instead so the agent can resume after the user responds.",
+    "For routine questions the agent can answer.",
+  )
+  .build();
 
 export const ESCALATE_TO_HUMAN_REASON_DESCRIPTION =
   "Reason for escalation (e.g. complaint, complex issue, out-of-scope, user asked for human).";
 
 // --- Tool: request_human_approval ---
 
-export const REQUEST_HUMAN_APPROVAL_TOOL_DESCRIPTION = `Pause for human approval or input. The run will wait until the user responds; then the agent continues with that input.
-
-## When to Use This Tool
-- You need a decision, confirmation, or clarification from the user before proceeding
-- You want to show the user a message or question and wait for their reply
-- The next step depends on user choice or approval
-
-## When NOT to Use This Tool
-- For full handoff to a human (no resume): use \`escalate_to_human\` instead.`;
+export const REQUEST_HUMAN_APPROVAL_TOOL_DESCRIPTION = new ToolDescriptionBuilder()
+  .intro(
+    "Pause for human approval or input. The run will wait until the user responds; then the agent continues with that input.",
+  )
+  .whenToUse(
+    "You need a decision, confirmation, or clarification from the user before proceeding",
+    "You want to show the user a message or question and wait for their reply",
+    "The next step depends on user choice or approval",
+  )
+  .whenNotToUse(
+    "For full handoff to a human (no resume): use `escalate_to_human` instead.",
+  )
+  .build();
 
 export const REQUEST_HUMAN_APPROVAL_REASON_DESCRIPTION =
   "Message or question to show the human (e.g. approval request, clarification question).";
@@ -124,20 +122,24 @@ export const LOAD_SKILL_SKILL_NAME_DESCRIPTION =
 
 // --- Tool: save_memory ---
 
-export const SAVE_MEMORY_TOOL_DESCRIPTION = `Save a fact or piece of information to long-term memory so it persists across conversations.
-
-## Scopes
-- **"contact"** (default): Private to the current user. Use for personal details, individual preferences, or anything specific to this person. These memories are never shared with other users.
-- **"agent"**: Shared across all users of this agent. Use only for general patterns, business knowledge, or learnings that apply universally — never for personal data.
-
-## When to Use This Tool
-- The user shares a preference, fact, or important detail you should remember for future conversations
-- You learn something about the user, project, or domain that will be useful later
-- The user explicitly asks you to remember something
-
-## When NOT to Use This Tool
-- For transient information only relevant to the current conversation
-- For information already saved in memory (check the Agent Memory section in the system prompt)`;
+export const SAVE_MEMORY_TOOL_DESCRIPTION = new ToolDescriptionBuilder()
+  .intro(
+    "Save a fact or piece of information to long-term memory so it persists across conversations.",
+  )
+  .section("Scopes", [
+    '**"contact"** (default): Private to the current user. Use for personal details, individual preferences, or anything specific to this person. These memories are never shared with other users.',
+    '**"agent"**: Shared across all users of this agent. Use only for general patterns, business knowledge, or learnings that apply universally — never for personal data.',
+  ])
+  .whenToUse(
+    "The user shares a preference, fact, or important detail you should remember for future conversations",
+    "You learn something about the user, project, or domain that will be useful later",
+    "The user explicitly asks you to remember something",
+  )
+  .whenNotToUse(
+    "For transient information only relevant to the current conversation",
+    "For information already saved in memory (check the Agent Memory section in the system prompt)",
+  )
+  .build();
 
 export const SAVE_MEMORY_CONTENT_DESCRIPTION =
   "The fact or information to remember. Be concise and specific (e.g. \"User prefers short summaries\").";
@@ -147,12 +149,14 @@ export const SAVE_MEMORY_SCOPE_DESCRIPTION =
 
 // --- Tool: delete_memory ---
 
-export const DELETE_MEMORY_TOOL_DESCRIPTION = `Delete a previously saved memory entry by its ID.
-
-## When to Use This Tool
-- A previously saved fact is no longer accurate or relevant
-- The user asks you to forget something
-- You need to correct a memory (delete the old one, then save the updated version)`;
+export const DELETE_MEMORY_TOOL_DESCRIPTION = new ToolDescriptionBuilder()
+  .intro("Delete a previously saved memory entry by its ID.")
+  .whenToUse(
+    "A previously saved fact is no longer accurate or relevant",
+    "The user asks you to forget something",
+    "You need to correct a memory (delete the old one, then save the updated version)",
+  )
+  .build();
 
 export const DELETE_MEMORY_ID_DESCRIPTION =
   "The ID of the memory entry to delete. Memory IDs are shown in the Agent Memory section of the system prompt.";
@@ -162,27 +166,7 @@ export const DELETE_MEMORY_SCOPE_DESCRIPTION =
 
 // --- Agent memory system message (modelled after deepagents createMemoryMiddleware) ---
 
-/**
- * System prompt template for agent memory. Injected via beforeModel so it is
- * ephemeral (removed in afterModel to avoid persisting in BullMQ job data).
- *
- * Contains `{memory_contents}` placeholder replaced at runtime.
- * Adapted from deepagents' MEMORY_SYSTEM_PROMPT: XML tags for structure,
- * comprehensive guidelines about when/how to save and delete memories, but
- * references our `save_memory` / `delete_memory` tools instead of `edit_file`.
- */
-export const AGENT_MEMORY_SYSTEM_PROMPT = `<agent_memory>
-<shared_memories description="General knowledge shared across all users of this agent">
-{agent_memory_contents}
-</shared_memories>
-
-<contact_memories description="Private to the current user — never shared with other users">
-{contact_memory_contents}
-</contact_memories>
-</agent_memory>
-
-<memory_guidelines>
-    The above <agent_memory> contains facts saved from previous conversations, split into two scopes:
+const AGENT_MEMORY_GUIDELINES = `The above <agent_memory> contains facts saved from previous conversations, split into two scopes:
     - **Shared memories** (scope: "agent"): visible to all users — general patterns, business knowledge, universal learnings.
     - **Contact memories** (scope: "contact"): private to the current user — personal details, preferences, history specific to this person.
 
@@ -254,8 +238,26 @@ export const AGENT_MEMORY_SYSTEM_PROMPT = `<agent_memory>
 
     Example 5 (do not remember transient information):
     User: I'm going to be in a meeting so I'll be offline for a few hours.
-    Agent: Understood, I'll have everything ready when you're back. (does not save to memory, as it is transient information)
-</memory_guidelines>`;
+    Agent: Understood, I'll have everything ready when you're back. (does not save to memory, as it is transient information)`;
+
+/**
+ * System prompt builder for agent memory. Injected via beforeModel so it is
+ * ephemeral (removed in afterModel to avoid persisting in BullMQ job data).
+ * Use .build({ agent_memory_contents, contact_memory_contents }) with formatted scope contents.
+ * Adapted from deepagents' MEMORY_SYSTEM_PROMPT; references our save_memory / delete_memory tools.
+ */
+export const AGENT_MEMORY_SYSTEM_PROMPT_BUILDER = new SystemPromptBuilder()
+  .section(
+    "agent_memory",
+    `<shared_memories description="General knowledge shared across all users of this agent">
+{agent_memory_contents}
+</shared_memories>
+
+<contact_memories description="Private to the current user — never shared with other users">
+{contact_memory_contents}
+</contact_memories>`,
+  )
+  .section("memory_guidelines", AGENT_MEMORY_GUIDELINES);
 
 /**
  * Format store items into a content block for one memory scope.
@@ -272,10 +274,12 @@ export function formatMemoryScopeContents(
 
 // --- Tool: search_knowledge ---
 
-export const SEARCH_KNOWLEDGE_TOOL_DESCRIPTION = `Search the knowledge base (RAG) for relevant documents.
-
-## When to Use This Tool
-Use when you need to find information from the agent's knowledge base: internal docs, FAQs, or other indexed content. Provide a clear search query.`;
+export const SEARCH_KNOWLEDGE_TOOL_DESCRIPTION = new ToolDescriptionBuilder()
+  .intro("Search the knowledge base (RAG) for relevant documents.")
+  .whenToUse(
+    "Use when you need to find information from the agent's knowledge base: internal docs, FAQs, or other indexed content. Provide a clear search query.",
+  )
+  .build();
 
 export const SEARCH_KNOWLEDGE_QUERY_DESCRIPTION =
   "Search query. Use clear, descriptive terms for the information you need.";

@@ -12,7 +12,7 @@ import {
 import { REMOVE_ALL_MESSAGES } from "../../utils/messageMapping.js";
 import {
   formatPreviousConversationSummary,
-  SUMMARIZATION_PROMPT_TEMPLATE,
+  SUMMARIZATION_PROMPT_BUILDER,
 } from "../prompts.js";
 
 
@@ -68,10 +68,9 @@ export function createSummarizationMiddleware(params: SummarizationMiddlewarePar
         }
       );
       const formattedMessages = getBufferString(historyMessages);
-      const formattedPrompt = SUMMARIZATION_PROMPT_TEMPLATE.replace(
-        "{messages}",
-        formattedMessages
-      );
+      const formattedPrompt = SUMMARIZATION_PROMPT_BUILDER.build({
+        messages: formattedMessages,
+      });
       const response = await model.invoke([new HumanMessage(formattedPrompt)]);
       const content = (response as { content?: string })?.content;
       const summary = typeof content === "string" ? content : String(content ?? "");
