@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { HumanMessage, RemoveMessage, SystemMessage } from "@langchain/core/messages";
-import { createSummarizationMiddleware, DEFAULT_SUMMARIZE_WHEN_HISTORY_LONGER_THAN } from "./summarization.js";
+import { createSummarizationMiddleware, DEFAULT_SUMMARIZATION_THRESHOLD } from "./summarization.js";
 import type { RunContext } from "../../options.js";
 
 const { mockInvoke, mockInitChatModel } = vi.hoisted(() => {
@@ -42,8 +42,8 @@ describe("createSummarizationMiddleware", () => {
     mockEval.mockResolvedValue(3);
   });
 
-  it("exposes DEFAULT_SUMMARIZE_WHEN_HISTORY_LONGER_THAN", () => {
-    expect(DEFAULT_SUMMARIZE_WHEN_HISTORY_LONGER_THAN).toBe(50);
+  it("exposes DEFAULT_SUMMARIZATION_THRESHOLD", () => {
+    expect(DEFAULT_SUMMARIZATION_THRESHOLD).toBe(50);
   });
 
   it("returns middleware with beforeAgent", () => {
@@ -64,7 +64,7 @@ describe("createSummarizationMiddleware", () => {
   }
 
   it("does nothing when context is missing redis", async () => {
-    const middleware = createSummarizationMiddleware({ summarizeWhenHistoryLongerThan: 2 });
+    const middleware = createSummarizationMiddleware({ historyThreshold: 2 });
     const state = { historyMessages: [new HumanMessage("Hi"), new HumanMessage("Bye")] };
     const runtime = { context: { ...runContext, redis: undefined } };
 
@@ -76,7 +76,7 @@ describe("createSummarizationMiddleware", () => {
   });
 
   it("does nothing when context is missing thread_id", async () => {
-    const middleware = createSummarizationMiddleware({ summarizeWhenHistoryLongerThan: 2 });
+    const middleware = createSummarizationMiddleware({ historyThreshold: 2 });
     const state = { historyMessages: [new HumanMessage("Hi"), new HumanMessage("Bye")] };
     const runtime = { context: { ...runContext, thread_id: undefined } };
 
@@ -88,7 +88,7 @@ describe("createSummarizationMiddleware", () => {
   });
 
   it("does nothing when context is missing chatModelOptions", async () => {
-    const middleware = createSummarizationMiddleware({ summarizeWhenHistoryLongerThan: 2 });
+    const middleware = createSummarizationMiddleware({ historyThreshold: 2 });
     const state = { historyMessages: [new HumanMessage("Hi"), new HumanMessage("Bye")] };
     const runtime = { context: { ...runContext, chatModelOptions: undefined } };
 
@@ -100,7 +100,7 @@ describe("createSummarizationMiddleware", () => {
   });
 
   it("does nothing when historyMessages length is below threshold", async () => {
-    const middleware = createSummarizationMiddleware({ summarizeWhenHistoryLongerThan: 3 });
+    const middleware = createSummarizationMiddleware({ historyThreshold: 3 });
     const state = { historyMessages: [new HumanMessage("Hi"), new HumanMessage("Bye")] };
     const runtime = { context: runContext };
 
@@ -112,7 +112,7 @@ describe("createSummarizationMiddleware", () => {
   });
 
   it("does nothing when historyMessages is empty", async () => {
-    const middleware = createSummarizationMiddleware({ summarizeWhenHistoryLongerThan: 2 });
+    const middleware = createSummarizationMiddleware({ historyThreshold: 2 });
     const state = { historyMessages: [] };
     const runtime = { context: runContext };
 
@@ -124,7 +124,7 @@ describe("createSummarizationMiddleware", () => {
   });
 
   it("when historyMessages meets threshold: calls initChatModel, invokes with summarization prompt, runs clear script, returns historyMessages empty and messages with summary", async () => {
-    const middleware = createSummarizationMiddleware({ summarizeWhenHistoryLongerThan: 2 });
+    const middleware = createSummarizationMiddleware({ historyThreshold: 2 });
     const state = {
       historyMessages: [
         new HumanMessage("What is the weather?"),
@@ -169,8 +169,8 @@ describe("createSummarizationMiddleware", () => {
     );
   });
 
-  it("uses custom threshold when summarizeWhenHistoryLongerThan is passed", async () => {
-    const middleware = createSummarizationMiddleware({ summarizeWhenHistoryLongerThan: 1 });
+  it("uses custom threshold when historyThreshold is set", async () => {
+    const middleware = createSummarizationMiddleware({ historyThreshold: 1 });
     const state = { historyMessages: [new HumanMessage("Only one")] };
     const runtime = { context: runContext };
 

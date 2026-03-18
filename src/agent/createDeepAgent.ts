@@ -9,24 +9,25 @@
  * at all.
  */
 import { Runnable } from "@langchain/core/runnables";
+import type { CompiledSubAgent, CreateDeepAgentParams, SubAgent } from "deepagents";
 import {
+  createPatchToolCallsMiddleware,
+  createSkillsMiddleware,
+  createSubAgentMiddleware,
+  StateBackend
+} from "deepagents";
+import {
+  anthropicPromptCachingMiddleware,
   createAgent,
+  humanInTheLoopMiddleware,
   SystemMessage,
   todoListMiddleware,
-  anthropicPromptCachingMiddleware,
-  humanInTheLoopMiddleware,
 } from "langchain";
-import type { CreateDeepAgentParams, SubAgent, CompiledSubAgent } from "deepagents";
-import {
-  createSubAgentMiddleware,
-  createPatchToolCallsMiddleware,
-  StateBackend,
-  createSkillsMiddleware,
-  createMemoryMiddleware,
-} from "deepagents";
-import { BASE_PROMPT } from "./prompts.js";
-import { createProgressMiddleware } from "./middlewares/progress.js";
+import { createAgentMemoryMiddleware, type AgentMemoryMiddlewareParams } from "./middlewares/agentMemory.js";
 import { createHistoryMiddleware } from "./middlewares/history.js";
+import { createProgressMiddleware } from "./middlewares/progress.js";
+import { createSummarizationMiddleware, type SummarizationMiddlewareParams } from "./middlewares/summarization.js";
+import { BASE_PROMPT } from "./prompts.js";
 
 /** Subagent type: either a spec (SubAgent) or a pre-compiled runnable (CompiledSubAgent). */
 type SubAgentOrCompiled = SubAgent | CompiledSubAgent;
@@ -56,12 +57,20 @@ function defaultBackendFactory(config: BackendConfig): InstanceType<typeof State
   return new StateBackend(config);
 }
 
+/** Params for createDeepAgent: deepagents params plus optional agentMemory and summarization. */
+export type CreateDeepAgentParamsLocal = Omit<CreateDeepAgentParams, "memory"> & {
+  /** When set, enables cross-thread agent memory (persisted by agentId). */
+  agentMemory?: AgentMemoryMiddlewareParams;
+  /** When set, enables history summarization when thread exceeds historyThreshold messages. */
+  summarization?: SummarizationMiddlewareParams;
+};
+
 /**
  * Same as createDeepAgent but without filesystem middleware.
  * Accepts the same params; returns a runnable compatible with createDeepAgent.
  */
 export function createDeepAgent(
-  params: CreateDeepAgentParams = {}
+  params: CreateDeepAgentParamsLocal = {}
 ): ReturnType<typeof createAgent> {
   const {
     // Default model string; only used if createDeepAgent is called without model. The orchestrator always passes an initialized chat model from initChatModel(provider:model, options).
@@ -76,8 +85,9 @@ export function createDeepAgent(
     backend,
     interruptOn,
     name,
-    memory,
     skills,
+    agentMemory,
+    summarization,
   } = params;
 
   const finalSystemPrompt = buildSystemPrompt(systemPrompt);
@@ -95,15 +105,10 @@ export function createDeepAgent(
       ]
       : [];
 
-  const memoryMiddlewareArray =
-    memory != null && memory.length > 0
-      ? [
-        createMemoryMiddleware({
-          backend: backendFactory,
-          sources: memory,
-        }),
-      ]
-      : [];
+  const agentMemoryMiddlewareArray =
+    agentMemory != null ? [createAgentMemoryMiddleware(agentMemory)] : [];
+  const summarizationMiddlewareArray =
+    summarization != null ? [createSummarizationMiddleware(summarization)] : [];
 
   const processedSubagents: SubAgentOrCompiled[] = subagents.map(
     (subagent: SubAgentOrCompiled): SubAgentOrCompiled => {
@@ -133,10 +138,11 @@ export function createDeepAgent(
   const baseMiddleware = [
     createProgressMiddleware(),
     createHistoryMiddleware(),
+    ...summarizationMiddlewareArray,
+    ...agentMemoryMiddlewareArray,
     anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
     createPatchToolCallsMiddleware(),
     ...skillsMiddlewareArray,
-    ...memoryMiddlewareArray,
     ...(interruptOn ? [humanInTheLoopMiddleware({ interruptOn })] : []),
     ...customMiddleware,
   ];
@@ -144,21 +150,21 @@ export function createDeepAgent(
   const middleware = subagents.length > 0
     ? baseMiddleware
     : [
-        todoListMiddleware(),
-        createSubAgentMiddleware({
-          defaultModel: model,
-          defaultTools: toolsForSubAgents,
-          defaultMiddleware: subagentMiddlewareNoFs,
-          generalPurposeMiddleware: [
-            ...subagentMiddlewareNoFs,
-            ...skillsMiddlewareArray,
-          ],
-          defaultInterruptOn: interruptOn ?? null,
-          subagents: processedSubagents,
-          generalPurposeAgent: true,
-        }),
-        ...baseMiddleware,
-      ];
+      todoListMiddleware(),
+      createSubAgentMiddleware({
+        defaultModel: model,
+        defaultTools: toolsForSubAgents,
+        defaultMiddleware: subagentMiddlewareNoFs,
+        generalPurposeMiddleware: [
+          ...subagentMiddlewareNoFs,
+          ...skillsMiddlewareArray,
+        ],
+        defaultInterruptOn: interruptOn ?? null,
+        subagents: processedSubagents,
+        generalPurposeAgent: true,
+      }),
+      ...baseMiddleware,
+    ];
 
   return createAgent({
     model,

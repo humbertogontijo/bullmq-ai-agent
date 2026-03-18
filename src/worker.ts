@@ -13,7 +13,13 @@ import { escalateToHuman } from "./agent/tools/escalateToHuman.js";
 import { requestHumanInTheLoop } from "./agent/tools/humanInTheLoop.js";
 import { createLoadSkillTool } from "./agent/tools/loadSkill.js";
 import { createSearchKnowledgeTool } from "./agent/tools/searchKnowledge.js";
+import { createSaveMemoryTool, createDeleteMemoryTool } from "./agent/tools/memory.js";
 import { AgentConfig, createDefaultAgentWorkerLogger, type AgentWorkerLogger, type ModelOptions, type Skill } from "./options.js";
+import type { AgentMemoryMiddlewareParams } from "./agent/middlewares/agentMemory.js";
+import type { SummarizationMiddlewareParams } from "./agent/middlewares/summarization.js";
+import type { AgentMemoryStore } from "./memory/AgentMemoryStore.js";
+import { RedisAgentMemoryStore } from "./memory/RedisAgentMemoryStore.js";
+import type { VectorStoreProviderInterface } from "./rag/index.js";
 import { VectorStoreProvider } from "./rag/index.js";
 import { getQueueKeyPrefix } from "./queues/queueKeys.js";
 import { AgentWorker } from "./workers/agentWorker.js";
@@ -31,8 +37,10 @@ import { SearchWorker } from "./workers/searchWorker.js";
 export interface BullMQAgentWorkerOptions extends QueueOptions {
   /** Redis connection (required by QueueOptions). Same Redis and prefix as client. */
   connection: ConnectionOptions;
-  /** Redis connection for RAG/document vector store only. If omitted, uses connection (queues use connection). */
+  /** Redis connection for RAG/document vector store only. If omitted, uses connection (queues use connection). Ignored when vectorStoreProvider is set. */
   documentConnection?: ConnectionOptions;
+  /** Custom vector store provider (e.g. PostgresVectorStore or any class extending VectorStore). When set, used for RAG/search/ingest instead of the built-in Redis provider; documentConnection is not used for RAG. */
+  vectorStoreProvider?: VectorStoreProviderInterface;
   /** Default chat model (provider, model, apiKey). Used when getAgentConfig does not provide a model for the agent. */
   chatModelOptions: ModelOptions;
   /** Subagents; when run/resume sets subagentId, that subagent runs directly. Supports customer-support flows: replying, suggestions (use ephemeral: true), takeovers via request_human_approval and escalate_to_human; run/resume metadata is passed to configurable for CRM-owned state. */
@@ -51,6 +59,12 @@ export interface BullMQAgentWorkerOptions extends QueueOptions {
   maxHistoryMessages?: number;
   /** Optional custom tools to add to the main agent (merged with built-in tools: search_knowledge, request_human_approval, escalate_to_human, load_skill). Use for CRM-specific or domain tools. */
   tools?: StructuredToolInterface[];
+  /** Custom AgentMemoryStore implementation. When provided, takes precedence over the built-in RedisAgentMemoryStore (enableAgentMemory must still be truthy to wire tools and middleware). */
+  agentMemoryStore?: AgentMemoryStore;
+  /** Enable cross-thread agent memory (persisted by agentId). When true, adds save_memory/delete_memory tools and memory middleware with a built-in RedisAgentMemoryStore. Pass an object to configure maxMemories. */
+  enableAgentMemory?: boolean | AgentMemoryMiddlewareParams;
+  /** Enable history summarization when thread exceeds threshold. When true, uses default options; pass an object to configure historyThreshold. */
+  enableSummarization?: boolean | SummarizationMiddlewareParams;
 }
 
 /**
@@ -59,7 +73,7 @@ export interface BullMQAgentWorkerOptions extends QueueOptions {
 export class BullMQAgentWorker {
   private readonly connection: ConnectionOptions;
   private readonly documentConnection: ConnectionOptions | undefined;
-  private vectorStoreProvider!: VectorStoreProvider;
+  private vectorStoreProvider: VectorStoreProviderInterface | undefined;
   private readonly options: Omit<QueueOptions, "connection">;
   private readonly chatModelOptions: ModelOptions;
   private readonly subagents: Subagent[] | undefined;
@@ -71,6 +85,9 @@ export class BullMQAgentWorker {
   private readonly logger: AgentWorkerLogger;
   private readonly maxHistoryMessages: number | undefined;
   private readonly customTools: StructuredToolInterface[] | undefined;
+  private readonly agentMemory: AgentMemoryMiddlewareParams | undefined;
+  private readonly customAgentMemoryStore: AgentMemoryStore | undefined;
+  private readonly summarization: SummarizationMiddlewareParams | undefined;
 
   private agentWorker: AgentWorker | null = null;
   private ingestWorker: IngestWorker | null = null;
@@ -79,9 +96,10 @@ export class BullMQAgentWorker {
   private documentRedisConnection: RedisConnection | null = null;
 
   constructor(options: BullMQAgentWorkerOptions) {
-    const { documentConnection, connection, chatModelOptions, subagents, systemPrompt, getAgentConfig, skills, embeddingModelOptions, logger, maxHistoryMessages, tools: customTools, ...bullOptions } = options;
+    const { documentConnection, connection, chatModelOptions, subagents, systemPrompt, getAgentConfig, skills, embeddingModelOptions, logger, maxHistoryMessages, tools: customTools, enableAgentMemory, agentMemoryStore, enableSummarization, vectorStoreProvider, ...bullOptions } = options;
     this.connection = connection;
     this.documentConnection = documentConnection;
+    this.vectorStoreProvider = vectorStoreProvider;
     this.chatModelOptions = chatModelOptions;
     this.subagents = subagents;
     this.systemPrompt = systemPrompt;
@@ -91,6 +109,13 @@ export class BullMQAgentWorker {
     this.logger = logger ?? createDefaultAgentWorkerLogger();
     this.maxHistoryMessages = maxHistoryMessages;
     this.customTools = customTools;
+    this.agentMemory = enableAgentMemory
+      ? (typeof enableAgentMemory === "object" ? enableAgentMemory : {})
+      : undefined;
+    this.customAgentMemoryStore = agentMemoryStore;
+    this.summarization = enableSummarization
+      ? (typeof enableSummarization === "object" ? enableSummarization : {})
+      : undefined;
     this.options = bullOptions;
   }
 
@@ -106,26 +131,29 @@ export class BullMQAgentWorker {
       queueOptions = { ...this.options, connection: await this.redisConnection.client };
     }
 
-    const docConnection = this.documentConnection ?? this.connection;
-    let documentClient: Redis | Cluster;
-    if (docConnection === this.connection) {
-      documentClient = queueClient;
-    } else if (isRedisInstance(docConnection)) {
-      documentClient = docConnection;
-    } else {
-      this.documentRedisConnection = new RedisConnection(docConnection);
-      documentClient = await this.documentRedisConnection.client;
+    if (!this.vectorStoreProvider) {
+      const docConnection = this.documentConnection ?? this.connection;
+      let documentClient: Redis | Cluster;
+      if (docConnection === this.connection) {
+        documentClient = queueClient;
+      } else if (isRedisInstance(docConnection)) {
+        documentClient = docConnection;
+      } else {
+        this.documentRedisConnection = new RedisConnection(docConnection);
+        documentClient = await this.documentRedisConnection.client;
+      }
+      this.vectorStoreProvider = new VectorStoreProvider({
+        client: documentClient,
+        prefix: this.options.prefix,
+      });
     }
-    this.vectorStoreProvider = new VectorStoreProvider({
-      client: documentClient,
-      prefix: this.options.prefix,
-    });
 
     const baseTools = [
       createSearchKnowledgeTool(this.vectorStoreProvider),
       requestHumanInTheLoop,
       escalateToHuman,
       ...(this.skills?.length ? [createLoadSkillTool(this.skills)] : []),
+      ...(this.agentMemory ? [createSaveMemoryTool(), createDeleteMemoryTool()] : []),
       ...(this.customTools ?? []),
     ];
     const systemPrompt = this.systemPrompt;
@@ -138,10 +166,16 @@ export class BullMQAgentWorker {
       systemPrompt,
       getAgentConfig,
       skills,
+      agentMemory: this.agentMemory,
+      summarization: this.summarization,
     });
 
     const redis = queueClient as Redis;
     const queueKeyPrefix = getQueueKeyPrefix(this.options.prefix);
+
+    const memoryStore = this.agentMemory
+      ? (this.customAgentMemoryStore ?? new RedisAgentMemoryStore(redis, queueKeyPrefix))
+      : undefined;
 
     this.agentWorker = new AgentWorker(
       {
@@ -152,6 +186,7 @@ export class BullMQAgentWorker {
         embeddingModelOptions: this.embeddingModelOptions,
         logger: this.logger,
         maxHistoryMessages: this.maxHistoryMessages,
+        agentMemoryStore: memoryStore,
       },
       queueOptions
     );

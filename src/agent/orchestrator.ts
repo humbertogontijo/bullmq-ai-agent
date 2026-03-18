@@ -4,7 +4,8 @@ import { CompiledSubAgent } from "deepagents";
 import { initChatModel, SystemMessage } from "langchain";
 import type { AgentConfig, ModelOptions, Skill } from "../options.js";
 import { createDeepAgent } from "./createDeepAgent.js";
-import { createSummarizationMiddleware } from "./middlewares/summarization.js";
+import type { AgentMemoryMiddlewareParams } from "./middlewares/agentMemory.js";
+import type { SummarizationMiddlewareParams } from "./middlewares/summarization.js";
 
 type TRunnable = Awaited<ReturnType<typeof createRunnable>>
 
@@ -32,6 +33,10 @@ export interface OrchestratorContext {
   getAgentConfig?: (agentId: string) => Promise<AgentConfig | undefined>;
   /** Optional skills for progressive disclosure; descriptions are injected into system prompt, load_skill tool loads full content. */
   skills?: Skill[];
+  /** When set, enables cross-thread agent memory (persisted by agentId). */
+  agentMemory?: AgentMemoryMiddlewareParams;
+  /** When set, enables history summarization when thread exceeds historyThreshold messages. */
+  summarization?: SummarizationMiddlewareParams;
 }
 
 /** Cache key for runnable cache (subagentId + model options). */
@@ -45,7 +50,8 @@ async function createRunnable(
   subagentId: string | undefined,
   chatModelOptions: ModelOptions
 ) {
-  const { tools, subagents, systemPrompt } = ctx;
+  const { tools, subagents, systemPrompt, agentMemory, summarization } = ctx;
+
   const compiledSubagents = await Promise.all(subagents?.map(async (subagent) => {
     const subagentModel = subagent.model ?? chatModelOptions;
     const chaModel = await initChatModel(`${subagentModel.provider}:${subagentModel.model}`, {
@@ -57,7 +63,8 @@ async function createRunnable(
       model: chaModel,
       tools: [...tools, ...(subagent.tools ?? [])],
       systemPrompt: new SystemMessage(subagent.systemPrompt),
-      middleware: [createSummarizationMiddleware()],
+      agentMemory,
+      summarization,
     });
     return {
       name: subagent.name,
@@ -80,7 +87,8 @@ async function createRunnable(
     tools,
     systemPrompt: systemPrompt ? new SystemMessage(systemPrompt) : "",
     subagents: compiledSubagents,
-    middleware: [createSummarizationMiddleware()]
+    agentMemory,
+    summarization,
   });
 }
 

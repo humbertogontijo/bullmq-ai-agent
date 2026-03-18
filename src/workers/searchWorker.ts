@@ -2,16 +2,16 @@ import { Worker, WorkerOptions } from "bullmq";
 import type { AgentWorkerLogger, ModelOptions } from "../options.js";
 import { QUEUE_NAMES } from "../options.js";
 import type { SearchJobData, SearchJobResult } from "../queues/types.js";
-import type { VectorStoreProvider } from "../rag/index.js";
+import type { VectorStoreProviderInterface } from "../rag/index.js";
 
 export interface SearchWorkerParams {
-  vectorStoreProvider: VectorStoreProvider;
+  vectorStoreProvider: VectorStoreProviderInterface;
   embeddingModelOptions: ModelOptions;
   logger: AgentWorkerLogger;
 }
 
 export class SearchWorker {
-  private readonly vectorStoreProvider: VectorStoreProvider;
+  private readonly vectorStoreProvider: VectorStoreProviderInterface;
   private readonly embeddingModelOptions: ModelOptions;
   private readonly logger: AgentWorkerLogger;
   private readonly options: WorkerOptions;

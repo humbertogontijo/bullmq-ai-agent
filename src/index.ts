@@ -47,7 +47,7 @@ export { createProgressMiddleware } from "./agent/middlewares/progress.js";
 export type { ProgressPayload, ProgressStage } from "./agent/middlewares/progress.js";
 export {
   createSummarizationMiddleware,
-  DEFAULT_SUMMARIZE_WHEN_HISTORY_LONGER_THAN,
+  DEFAULT_SUMMARIZATION_THRESHOLD,
 } from "./agent/middlewares/summarization.js";
 export type { SummarizationMiddlewareParams } from "./agent/middlewares/summarization.js";
 export type { AgentConfig, Skill } from "./options.js";
@@ -61,8 +61,29 @@ export {
   mapStoredMessageToChatMessage,
   mapStoredMessagesToChatMessages,
 } from "./utils/messageMapping.js";
-export { VectorStoreProvider, type VectorStoreProviderOptions } from "./rag/index.js";
+export { VectorStoreProvider } from "./rag/index.js";
+export type {
+  GetVectorStoreOptions,
+  VectorStoreProviderInterface,
+  VectorStoreProviderOptions,
+} from "./rag/index.js";
 export { RedisVectorStore, type RedisAddOptions, type RedisVectorStoreConfig } from "./redis/RedisVectorStore.js";
+
+export type { AgentMemoryStore, Item } from "./memory/index.js";
+export {
+  DEFAULT_SEARCH_LIMIT,
+  MEMORY_NAMESPACE_PREFIX,
+  buildMemoryNamespace,
+  buildContactMemoryNamespace,
+  RedisAgentMemoryStore,
+  buildStoreKey,
+  buildStoreDataKey,
+} from "./memory/index.js";
+export type { MemoryRedis } from "./memory/index.js";
+export {
+  createAgentMemoryMiddleware,
+} from "./agent/middlewares/agentMemory.js";
+export type { AgentMemoryMiddlewareParams } from "./agent/middlewares/agentMemory.js";
 
 // LangChain re-exports for convenience
 export { HumanMessage, SystemMessage } from "@langchain/core/messages";

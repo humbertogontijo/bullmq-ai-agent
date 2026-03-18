@@ -26,6 +26,8 @@ export interface AwaitableOptions {
 export interface RunFlowChildOptions {
   /** Initial messages (StoredMessage[], e.g. [{ type: "human", data: { content: "Hello" } }]). */
   messages: StoredMessage[];
+  /** Contact id (end-user identity). Scopes per-contact memories so personal data never leaks across users. Defaults to threadId when omitted. */
+  contactId?: string;
   /** Subagent name; when set, that subagent runs directly (must match a subagent name from BullMQAgentWorker options). */
   subagentId?: string;
   /** Optional run-level metadata (e.g. owner, tenant). Passed to configurable so tools and getAgentConfig can read it. */
@@ -40,6 +42,8 @@ export interface RunOptions extends RunFlowChildOptions, AwaitableOptions {
 export interface ResumeToolFlowChildOptions {
   /** Human response content for the request_human_approval tool. */
   content: string;
+  /** Contact id (end-user identity). Must match the contactId used in the original run. Defaults to threadId when omitted. */
+  contactId?: string;
   /** Pass when resuming so the same runnable (main or subagent) is used. */
   subagentId?: string;
   /** Optional run-level metadata. */
@@ -261,6 +265,7 @@ export class BullMQAgentClient {
   ): Promise<RunResult> {
     const spec = this.buildRunFlowChild(agentId, threadId, {
       messages: options.messages,
+      contactId: options.contactId,
       subagentId: options.subagentId,
       metadata: options.metadata,
     });
@@ -287,6 +292,7 @@ export class BullMQAgentClient {
   ): Promise<ResumeResult> {
     const spec = this.buildResumeToolFlowChild(agentId, threadId, {
       content: options.content,
+      contactId: options.contactId,
       subagentId: options.subagentId,
       metadata: options.metadata,
     });
@@ -317,6 +323,7 @@ export class BullMQAgentClient {
       data: {
         agentId,
         threadId,
+        contactId: options.contactId,
         subagentId: options.subagentId,
         metadata: options.metadata,
         input: { messages: options.messages },
@@ -338,6 +345,7 @@ export class BullMQAgentClient {
       data: {
         agentId,
         threadId,
+        contactId: options.contactId,
         content: options.content,
         subagentId: options.subagentId,
         metadata: options.metadata,

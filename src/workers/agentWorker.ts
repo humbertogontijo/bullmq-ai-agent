@@ -4,6 +4,7 @@ import type { CompiledGraph } from "../agent/compile.js";
 import { parseTimestampFromJobId, serializeAgentState } from "../agent/middlewares/history.js";
 import { getLastJobAndReturnvalueScript } from "../commands/index.js";
 import type { AgentWorkerLogger, ModelOptions, RedisLike } from "../options.js";
+import type { AgentMemoryStore } from "../memory/AgentMemoryStore.js";
 import { buildRunContext, QUEUE_NAMES } from "../options.js";
 import { buildJobIdPrefix, buildThreadJobsKey } from "../queues/queueKeys.js";
 import type {
@@ -30,6 +31,8 @@ export interface AgentWorkerParams {
   logger: AgentWorkerLogger;
   /** When set, passed to getPreviousReturnvalues Lua as max number of previous jobs to load. */
   maxHistoryMessages?: number;
+  /** Cross-thread memory store. Set by BullMQAgentWorker when enableAgentMemory is on. */
+  agentMemoryStore?: AgentMemoryStore;
 }
 
 export class AgentWorker {
@@ -40,6 +43,7 @@ export class AgentWorker {
   private readonly embeddingModelOptions: ModelOptions;
   private readonly logger: AgentWorkerLogger;
   private readonly maxHistoryMessages: number | undefined;
+  private readonly agentMemoryStore: AgentMemoryStore | undefined;
   private readonly options: WorkerOptions;
   private _started = false;
   private worker: Worker<AgentJobData, AgentJobResult> | null = null;
@@ -52,6 +56,7 @@ export class AgentWorker {
     this.embeddingModelOptions = params.embeddingModelOptions;
     this.logger = params.logger;
     this.maxHistoryMessages = params.maxHistoryMessages;
+    this.agentMemoryStore = params.agentMemoryStore;
     this.options = options;
   }
 
@@ -60,6 +65,7 @@ export class AgentWorker {
     const data = job.data;
     const threadId = data.threadId;
     const agentId = data.agentId;
+    const contactId = data.contactId ?? threadId;
     const subagentId = data.subagentId;
 
     const systemParts: InstanceType<typeof SystemMessage>[] = [];
@@ -89,12 +95,14 @@ export class AgentWorker {
       job,
       agentId,
       thread_id: threadId,
+      contactId,
       chatModelOptions,
       embeddingModelOptions: this.embeddingModelOptions,
       metadata: data.metadata,
       redis: this.redis,
       queueKeyPrefix: this.queueKeyPrefix,
       maxHistoryMessages: this.maxHistoryMessages,
+      agentMemoryStore: this.agentMemoryStore,
     });
 
     let inputStored: StoredAgentState["messages"];

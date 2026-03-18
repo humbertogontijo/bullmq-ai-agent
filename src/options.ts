@@ -2,6 +2,7 @@ import type { SystemMessageFields } from "@langchain/core/messages";
 import { Job } from "bullmq";
 import type { Redis } from "ioredis";
 import { z } from "zod";
+import type { AgentMemoryStore } from "./memory/AgentMemoryStore.js";
 
 export interface AgentWorkerLogger {
   error: (msg: string, err?: Error) => void;
@@ -70,6 +71,8 @@ export const runContextContextSchema = z.object({
   agentId: z.string(),
   /** Thread id (conversation id). Used for history and jobId format threadId/<snowflake>. */
   thread_id: z.string(),
+  /** Contact id (end-user identity). Scopes per-contact memories so personal data never leaks across users. */
+  contactId: z.string(),
   /** When set, the runnable for this subagent is used directly. */
   subagentId: z.string().optional(),
   /** Chat model options for this run (merged from worker default + getAgentConfig). */
@@ -84,6 +87,8 @@ export const runContextContextSchema = z.object({
   queueKeyPrefix: z.string().optional(),
   /** When set, passed to getPreviousReturnvalues Lua as max number of previous jobs to load (limits history size). */
   maxHistoryMessages: z.number().optional(),
+  /** Cross-thread memory store scoped by agentId. Set by worker when enableAgentMemory is on. */
+  agentMemoryStore: z.custom<AgentMemoryStore>().optional(),
 });
 
 /** Per-run data passed in graph configurable. Type derived from runContextContextSchema. */
@@ -96,6 +101,7 @@ export function buildRunContext(params: {
   job: Job;
   agentId: string;
   thread_id: string;
+  contactId: string;
   subagentId?: string;
   chatModelOptions?: ModelOptions;
   embeddingModelOptions?: ModelOptions;
@@ -103,11 +109,13 @@ export function buildRunContext(params: {
   redis?: RedisLike;
   queueKeyPrefix?: string;
   maxHistoryMessages?: number;
+  agentMemoryStore?: AgentMemoryStore;
 }): RunContext {
   return {
     job: params.job,
     agentId: params.agentId,
     thread_id: params.thread_id,
+    contactId: params.contactId,
     subagentId: params.subagentId,
     chatModelOptions: params.chatModelOptions,
     embeddingModelOptions: params.embeddingModelOptions,
@@ -115,5 +123,6 @@ export function buildRunContext(params: {
     redis: params.redis,
     queueKeyPrefix: params.queueKeyPrefix,
     maxHistoryMessages: params.maxHistoryMessages,
+    agentMemoryStore: params.agentMemoryStore,
   };
 }

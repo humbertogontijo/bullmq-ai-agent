@@ -22,3 +22,23 @@ export const clearThreadJobsAndRemoveJobsScript = readFileSync(
   join(__dirname, "clearThreadJobsAndRemoveJobs.lua"),
   "utf8"
 );
+
+export const saveMemoryScript = readFileSync(
+  join(__dirname, "saveMemory.lua"),
+  "utf8"
+);
+
+export const getMemoriesScript = readFileSync(
+  join(__dirname, "getMemories.lua"),
+  "utf8"
+);
+
+export const deleteMemoryScript = readFileSync(
+  join(__dirname, "deleteMemory.lua"),
+  "utf8"
+);
+
+export const clearMemoriesScript = readFileSync(
+  join(__dirname, "clearMemories.lua"),
+  "utf8"
+);

@@ -83,7 +83,7 @@ const defaultOptions = {
  * Use env for connection and queue names.
  */
 export async function startWorkers(modelOptions: { chatModelOptions: ModelOptions; embeddingModelOptions: ModelOptions }): Promise<BullMQAgentWorker> {
-  const workers = new BullMQAgentWorker({ ...defaultOptions, ...modelOptions });
+  const workers = new BullMQAgentWorker({ ...defaultOptions, ...modelOptions, enableAgentMemory: true });
   await workers.start();
   return workers;
 }
@@ -263,6 +263,62 @@ async function flowHumanInTheLoop(client: BullMQAgentClient, modelOptions: { cha
   }
 }
 
+async function flowMemory(client: BullMQAgentClient, modelOptions: { chatModelOptions: ModelOptions; embeddingModelOptions: ModelOptions }): Promise<void> {
+  clack.note(
+    "Test cross-thread memory: tell the agent something to remember in one thread, then start a new thread and see if it recalls.",
+    "Agent Memory"
+  );
+
+  const threadA = `memory-thread-a-${Date.now()}`;
+  const threadB = `memory-thread-b-${Date.now()}`;
+  const agentId = "default";
+
+  // Thread A: tell the agent to remember something
+  const saveMsg = orExit(
+    await clack.text({
+      message: "[Thread A] Tell the agent something to remember",
+      placeholder: "e.g. My name is Alice and I prefer TypeScript.",
+    })
+  );
+  if (!saveMsg.trim()) return;
+
+  clack.log.message(`Sending to Thread A (${threadA})...`);
+  try {
+    const messages = toStoredMessages([{ role: "user", content: `Please remember this using the save_memory tool: ${saveMsg}` }]);
+    const runResult = await client.run(agentId, threadA, { messages, ttl: WAIT_TTL });
+    const result = await runResult.promise;
+    if (!isFallbackResult(result)) {
+      const reply = getLastMessageFromChunk(result as AgentJobResult);
+      if (reply) clack.note(reply, "Assistant (Thread A)");
+    }
+  } catch (err) {
+    clack.log.error(String(err));
+    return;
+  }
+
+  // Thread B: ask if the agent remembers
+  const recallMsg = orExit(
+    await clack.text({
+      message: "[Thread B] Ask the agent what it remembers (different thread, same agentId)",
+      placeholder: "e.g. What do you know about me?",
+    })
+  );
+  if (!recallMsg.trim()) return;
+
+  clack.log.message(`Sending to Thread B (${threadB})...`);
+  try {
+    const messages = toStoredMessages([{ role: "user", content: recallMsg }]);
+    const runResult = await client.run(agentId, threadB, { messages, ttl: WAIT_TTL });
+    const result = await runResult.promise;
+    if (!isFallbackResult(result)) {
+      const reply = getLastMessageFromChunk(result as AgentJobResult);
+      if (reply) clack.note(reply, "Assistant (Thread B)");
+    }
+  } catch (err) {
+    clack.log.error(String(err));
+  }
+}
+
 async function main(): Promise<void> {
   const scriptPath = fileURLToPath(import.meta.url);
   const isRunDirectly = process.argv[1] === scriptPath || process.argv[1]?.endsWith("cli.ts") || process.argv[1]?.endsWith("cli.js");
@@ -285,6 +341,7 @@ async function main(): Promise<void> {
             { value: "basic", label: "Basic chat", hint: "Free-form conversation" },
             { value: "rag", label: "RAG", hint: "Ingest + ask questions with search_knowledge" },
             { value: "hitl", label: "Human-in-the-loop", hint: "Request approval then resume" },
+            { value: "memory", label: "Memory", hint: "Cross-thread memory: remember facts across conversations" },
             { value: "exit", label: "Exit" },
           ],
         })
@@ -301,6 +358,9 @@ async function main(): Promise<void> {
           break;
         case "hitl":
           await flowHumanInTheLoop(client, modelOptions);
+          break;
+        case "memory":
+          await flowMemory(client, modelOptions);
           break;
       }
     }

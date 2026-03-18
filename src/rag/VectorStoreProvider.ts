@@ -5,6 +5,23 @@ import type { ModelOptions } from "../options.js";
 import { RedisVectorStore } from "../redis/RedisVectorStore.js";
 import { getEmbeddings } from "./embeddings.js";
 
+/** Options passed to getVectorStore; store-specific (e.g. Redis uses inferredSchema, others may ignore). */
+export interface GetVectorStoreOptions {
+  inferredSchema?: unknown;
+}
+
+/**
+ * Interface for providing VectorStore instances per index (e.g. per agentId).
+ * Implement this to use custom backends (e.g. PostgresVectorStore) with BullMQAgentWorker.
+ */
+export interface VectorStoreProviderInterface {
+  getVectorStore(
+    indexName: string,
+    embeddingModelOptions: ModelOptions,
+    options?: GetVectorStoreOptions
+  ): Promise<VectorStore>;
+}
+
 export interface VectorStoreProviderOptions {
   client: Redis | Cluster;
   prefix?: string;
@@ -15,10 +32,10 @@ const DEFAULT_RAG_METADATA_SCHEMA: MetadataFieldSchema[] = [
 ];
 
 /**
- * Provides RedisVectorStore instances (ioredis-backed) keyed by index name (e.g. agentId).
+ * Built-in provider that returns RedisVectorStore instances (ioredis-backed) keyed by index name (e.g. agentId).
  * Caller passes embeddingModelOptions (including apiKey); library does not read process.env.
  */
-export class VectorStoreProvider {
+export class VectorStoreProvider implements VectorStoreProviderInterface {
   readonly client: Redis | Cluster;
   readonly prefix: string | undefined;
 
@@ -31,8 +48,9 @@ export class VectorStoreProvider {
   async getVectorStore(
     indexName: string,
     embeddingModelOptions: ModelOptions,
-    inferredSchema?: MetadataFieldSchema[]
+    options?: GetVectorStoreOptions
   ): Promise<VectorStore> {
+    const inferredSchema = (options?.inferredSchema ?? DEFAULT_RAG_METADATA_SCHEMA) as MetadataFieldSchema[];
     const embeddings = getEmbeddings({
       provider: embeddingModelOptions.provider as "openai" | "cohere",
       model: embeddingModelOptions.model,
@@ -41,7 +59,7 @@ export class VectorStoreProvider {
     const store = new RedisVectorStore(embeddings, {
       client: this.client,
       indexName,
-      customSchema: inferredSchema ?? DEFAULT_RAG_METADATA_SCHEMA,
+      customSchema: inferredSchema,
       keyPrefix: this.prefix,
     });
     return store;

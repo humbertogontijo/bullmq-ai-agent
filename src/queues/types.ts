@@ -32,6 +32,8 @@ export type StoredMessage = StoredToolMessage | StoredHumanMessage | StoredAIMes
 export interface AgentRunData {
   agentId: string;
   threadId: string;
+  /** Contact id (end-user identity). Scopes per-contact memories so personal data never leaks across users. Defaults to threadId when omitted. */
+  contactId?: string;
   /** Subagent name; when set, that subagent runs directly (must match a subagent from BullMQAgentWorker options). */
   subagentId?: string;
   /** Optional run-level metadata (e.g. owner, tenant). Passed to configurable for tools and getAgentConfig. */
@@ -45,6 +47,8 @@ export interface AgentRunData {
 export interface AgentResumeToolData {
   agentId: string;
   threadId: string;
+  /** Contact id (end-user identity). Scopes per-contact memories so personal data never leaks across users. Defaults to threadId when omitted. */
+  contactId?: string;
   /** Human response content for the request_human_approval tool. */
   content: string;
   /** Pass when resuming so the same runnable (main or subagent) is used. */

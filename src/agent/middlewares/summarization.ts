@@ -18,11 +18,11 @@ import {
 
 
 /** Default message count above which summarization runs. */
-export const DEFAULT_SUMMARIZE_WHEN_HISTORY_LONGER_THAN = 50;
+export const DEFAULT_SUMMARIZATION_THRESHOLD = 50;
 
 export interface SummarizationMiddlewareParams {
   /** When thread history message count exceeds this, run summarization and clear thread-jobs. Default 50. */
-  summarizeWhenHistoryLongerThan?: number;
+  historyThreshold?: number;
 }
 
 /**
@@ -38,8 +38,7 @@ export interface SummarizationMiddlewareParams {
  * Expects run context (redis, thread_id, queueKeyPrefix, chatModelOptions) via config.context.
  */
 export function createSummarizationMiddleware(params: SummarizationMiddlewareParams = {}) {
-  const summarizeWhenHistoryLongerThan =
-    params.summarizeWhenHistoryLongerThan ?? DEFAULT_SUMMARIZE_WHEN_HISTORY_LONGER_THAN;
+  const threshold = params.historyThreshold ?? DEFAULT_SUMMARIZATION_THRESHOLD;
 
   return createMiddleware({
     name: "SummarizationMiddleware",
@@ -56,7 +55,7 @@ export function createSummarizationMiddleware(params: SummarizationMiddlewarePar
       }
 
       const historyMessages = (state?.historyMessages ?? []) as BaseMessage[];
-      if (historyMessages.length < summarizeWhenHistoryLongerThan) {
+      if (historyMessages.length < threshold) {
         return;
       }
 

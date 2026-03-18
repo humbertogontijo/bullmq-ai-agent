@@ -1,7 +1,7 @@
 import { tool } from "@langchain/core/tools";
 import type { LangGraphRunnableConfig } from "@langchain/langgraph";
 import type { RunContext } from "../../options.js";
-import type { VectorStoreProvider } from "../../rag/index.js";
+import type { VectorStoreProviderInterface } from "../../rag/index.js";
 import {
   SEARCH_KNOWLEDGE_K_DESCRIPTION,
   SEARCH_KNOWLEDGE_QUERY_DESCRIPTION,
@@ -30,7 +30,7 @@ const schema = {
  * the client is passed in args.__documentRedisClient and searchKnowledge is used.
  */
 export function createSearchKnowledgeTool(
-  vectorStoreProvider: VectorStoreProvider
+  vectorStoreProvider: VectorStoreProviderInterface
 ) {
   return tool(
     async (args: {
