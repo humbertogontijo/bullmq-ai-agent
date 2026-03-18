@@ -23,7 +23,7 @@ const aiMsgOtherTool: StoredMessage = {
   data: {
     content: "",
     name: undefined,
-    tool_calls: [{ id: "call_2", name: "search_knowledge", args: {} }],
+    tool_calls: [{ id: "call_2", name: "retrieve", args: {} }],
   },
 };
 
@@ -36,9 +36,9 @@ describe("getLastRequestHumanApprovalToolCall", () => {
     expect(getLastRequestHumanApprovalToolCall([humanMsg, aiMsgNoToolCalls])).toBeUndefined();
     expect(getLastRequestHumanApprovalToolCall([])).toBeUndefined();
   });
-  it("returns first tool call of last AI message when it has other tool (e.g. search_knowledge)", () => {
+  it("returns first tool call of last AI message when it has other tool (e.g. retrieve)", () => {
     const result = getLastRequestHumanApprovalToolCall([humanMsg, aiMsgOtherTool]);
-    expect(result).toEqual({ id: "call_2", name: "search_knowledge", args: {} });
+    expect(result).toEqual({ id: "call_2", name: "retrieve", args: {} });
   });
   it("returns first tool call from last AI message with request_human_approval when multiple", () => {
     const aiSecondHitl: StoredMessage = {
@@ -67,7 +67,7 @@ describe("isResumeRequired", () => {
     const chunk: StoredAgentState = { messages: [humanMsg, aiMsgNoToolCalls] };
     expect(isResumeRequired(chunk)).toBe(false);
   });
-  it("returns true when last message is AI with any tool_calls (e.g. search_knowledge)", () => {
+  it("returns true when last message is AI with any tool_calls (e.g. retrieve)", () => {
     const chunk: StoredAgentState = { messages: [humanMsg, aiMsgOtherTool] };
     expect(isResumeRequired(chunk)).toBe(true);
   });

@@ -8,11 +8,9 @@
  * helper does not add any filesystem middleware, so no file tools are exposed
  * at all.
  */
-import { Runnable } from "@langchain/core/runnables";
-import type { CompiledSubAgent, CreateDeepAgentParams, SubAgent } from "deepagents";
+import type { CompiledSubAgent, CreateDeepAgentParams } from "deepagents";
 import {
   createPatchToolCallsMiddleware,
-  createSkillsMiddleware,
   createSubAgentMiddleware,
   StateBackend
 } from "deepagents";
@@ -27,24 +25,25 @@ import { createAgentMemoryMiddleware, type AgentMemoryMiddlewareParams } from ".
 import { createHistoryMiddleware } from "./middlewares/history.js";
 import { createProgressMiddleware } from "./middlewares/progress.js";
 import { createSummarizationMiddleware, type SummarizationMiddlewareParams } from "./middlewares/summarization.js";
-import { BASE_PROMPT } from "./prompts.js";
-
-/** Subagent type: either a spec (SubAgent) or a pre-compiled runnable (CompiledSubAgent). */
-type SubAgentOrCompiled = SubAgent | CompiledSubAgent;
+import { BASE_PROMPT, RETRIEVE_SYSTEM_PROMPT } from "./prompts.js";
+import { createRetrieveTool } from "./tools/retrieve.js";
+import type { VectorStoreProviderInterface } from "../rag/index.js";
 
 /** Config passed to backend factories; matches CreateDeepAgentParams["backend"] callback argument. */
 type BackendConfig = Parameters<Extract<NonNullable<CreateDeepAgentParams["backend"]>, Function>>[0];
 
 function buildSystemPrompt(
-  systemPrompt: CreateDeepAgentParams["systemPrompt"]
+  systemPrompt: CreateDeepAgentParams["systemPrompt"],
+  prependRetrievePrompt: boolean
 ): string | InstanceType<typeof SystemMessage> {
-  if (!systemPrompt) return BASE_PROMPT;
+  const base = prependRetrievePrompt ? RETRIEVE_SYSTEM_PROMPT : BASE_PROMPT;
+  if (!systemPrompt) return base;
   if (typeof systemPrompt === "string") {
-    return `${systemPrompt}\n\n${BASE_PROMPT}`;
+    return `${systemPrompt}\n\n${base}`;
   }
   return new SystemMessage({
     content: [
-      { type: "text" as const, text: BASE_PROMPT },
+      { type: "text" as const, text: base },
       ...(typeof systemPrompt.content === "string"
         ? [{ type: "text" as const, text: systemPrompt.content }]
         : systemPrompt.content),
@@ -57,12 +56,19 @@ function defaultBackendFactory(config: BackendConfig): InstanceType<typeof State
   return new StateBackend(config);
 }
 
-/** Params for createDeepAgent: deepagents params plus optional agentMemory and summarization. */
+/** RAG config: when set, the retrieve tool and RAG system prompt are added to the agent. */
+export type RagParams = {
+  vectorStoreProvider: VectorStoreProviderInterface;
+};
+
+/** Params for createDeepAgent: deepagents params plus optional agentMemory, summarization, and rag. */
 export type CreateDeepAgentParamsLocal = Omit<CreateDeepAgentParams, "memory"> & {
   /** When set, enables cross-thread agent memory (persisted by agentId). */
   agentMemory?: AgentMemoryMiddlewareParams;
   /** When set, enables history summarization when thread exceeds historyThreshold messages. */
   summarization?: SummarizationMiddlewareParams;
+  /** When set, adds the retrieve tool and RAG system prompt (requires embeddingModelOptions in run configurable). */
+  rag?: RagParams;
 };
 
 /**
@@ -85,46 +91,20 @@ export function createDeepAgent(
     backend,
     interruptOn,
     name,
-    skills,
     agentMemory,
     summarization,
+    rag,
   } = params;
 
-  const finalSystemPrompt = buildSystemPrompt(systemPrompt);
+  const finalSystemPrompt = buildSystemPrompt(systemPrompt, !!rag);
 
   const backendFactory: NonNullable<CreateDeepAgentParams["backend"]> =
     backend ?? defaultBackendFactory;
-
-  const skillsMiddlewareArray =
-    skills != null && skills.length > 0
-      ? [
-        createSkillsMiddleware({
-          backend: backendFactory,
-          sources: skills,
-        }),
-      ]
-      : [];
 
   const agentMemoryMiddlewareArray =
     agentMemory != null ? [createAgentMemoryMiddleware(agentMemory)] : [];
   const summarizationMiddlewareArray =
     summarization != null ? [createSummarizationMiddleware(summarization)] : [];
-
-  const processedSubagents: SubAgentOrCompiled[] = subagents.map(
-    (subagent: SubAgentOrCompiled): SubAgentOrCompiled => {
-      if (Runnable.isRunnable(subagent)) return subagent;
-      if (!("skills" in subagent) || !subagent.skills?.length) return subagent;
-      const sa = subagent as SubAgent;
-      const subagentSkillsMiddleware = createSkillsMiddleware({
-        backend: backendFactory,
-        sources: sa.skills ?? [],
-      });
-      return {
-        ...sa,
-        middleware: [subagentSkillsMiddleware, ...(sa.middleware ?? [])],
-      };
-    }
-  );
 
   const subagentMiddlewareNoFs = [
     todoListMiddleware(),
@@ -133,6 +113,9 @@ export function createDeepAgent(
   ];
 
   const toolsList = tools ? [...tools] : [];
+  if (rag) {
+    toolsList.unshift(createRetrieveTool(rag.vectorStoreProvider));
+  }
   const toolsForSubAgents = toolsList as Parameters<typeof createSubAgentMiddleware>[0]["defaultTools"];
 
   const baseMiddleware = [
@@ -142,7 +125,6 @@ export function createDeepAgent(
     ...agentMemoryMiddlewareArray,
     anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
     createPatchToolCallsMiddleware(),
-    ...skillsMiddlewareArray,
     ...(interruptOn ? [humanInTheLoopMiddleware({ interruptOn })] : []),
     ...customMiddleware,
   ];
@@ -155,12 +137,9 @@ export function createDeepAgent(
         defaultModel: model,
         defaultTools: toolsForSubAgents,
         defaultMiddleware: subagentMiddlewareNoFs,
-        generalPurposeMiddleware: [
-          ...subagentMiddlewareNoFs,
-          ...skillsMiddlewareArray,
-        ],
+        generalPurposeMiddleware: subagentMiddlewareNoFs,
         defaultInterruptOn: interruptOn ?? null,
-        subagents: processedSubagents,
+        subagents: [...subagents],
         generalPurposeAgent: true,
       }),
       ...baseMiddleware,

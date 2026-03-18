@@ -11,10 +11,8 @@ import { compileGraph } from "./agent/compile.js";
 import type { Subagent } from "./agent/orchestrator.js";
 import { escalateToHuman } from "./agent/tools/escalateToHuman.js";
 import { requestHumanInTheLoop } from "./agent/tools/humanInTheLoop.js";
-import { createLoadSkillTool } from "./agent/tools/loadSkill.js";
-import { createSearchKnowledgeTool } from "./agent/tools/searchKnowledge.js";
 import { createSaveMemoryTool, createDeleteMemoryTool } from "./agent/tools/memory.js";
-import { AgentConfig, createDefaultAgentWorkerLogger, type AgentWorkerLogger, type ModelOptions, type Skill } from "./options.js";
+import { AgentConfig, createDefaultAgentWorkerLogger, type AgentWorkerLogger, type ModelOptions } from "./options.js";
 import type { AgentMemoryMiddlewareParams } from "./agent/middlewares/agentMemory.js";
 import type { SummarizationMiddlewareParams } from "./agent/middlewares/summarization.js";
 import type { AgentMemoryStore } from "./memory/AgentMemoryStore.js";
@@ -31,7 +29,7 @@ import { SearchWorker } from "./workers/searchWorker.js";
  *
  * **Required:** `connection`, `chatModelOptions`, `embeddingModelOptions` (from QueueOptions and below).
  * **Optional:** all others. Valid combinations: you can omit subagents and use only getAgentConfig for
- * per-agent prompts; or provide subagents with or without getAgentConfig. Skills are independent.
+ * per-agent prompts; or provide subagents with or without getAgentConfig.
  * Wrong config (e.g. subagentId at run time that does not match a subagent name) fails at first job.
  */
 export interface BullMQAgentWorkerOptions extends QueueOptions {
@@ -49,15 +47,13 @@ export interface BullMQAgentWorkerOptions extends QueueOptions {
   systemPrompt?: SystemMessageFields;
   /** Async function returning per-agent config (systemPrompt, default model/temperature). Merged with worker chatModelOptions. */
   getAgentConfig?: (agentId: string) => Promise<AgentConfig | undefined>;
-  /** Optional skills for progressive disclosure; descriptions go in system prompt, load_skill loads full content. */
-  skills?: Skill[];
-  /** Embedding model for RAG/search and ingest (provider, model, apiKey). Pass apiKey from the caller (e.g. CLI). */
-  embeddingModelOptions: ModelOptions;
+  /** Embedding model for RAG/search and ingest (provider, model, apiKey). When provided together with vectorStoreProvider (or documentConnection), enables the retrieve tool and ingest/search workers. */
+  embeddingModelOptions?: ModelOptions;
   /** Logger passed to all workers. When provided, used for error/fail events; debug used for completed if available. */
   logger?: AgentWorkerLogger;
   /** When set, passed to getPreviousReturnvalues Lua as max number of previous jobs to load (limits history size). */
   maxHistoryMessages?: number;
-  /** Optional custom tools to add to the main agent (merged with built-in tools: search_knowledge, request_human_approval, escalate_to_human, load_skill). Use for CRM-specific or domain tools. */
+  /** Optional custom tools to add to the main agent (merged with built-in tools: retrieve, request_human_approval, escalate_to_human). Use for CRM-specific or domain tools. */
   tools?: StructuredToolInterface[];
   /** Custom AgentMemoryStore implementation. When provided, takes precedence over the built-in RedisAgentMemoryStore (enableAgentMemory must still be truthy to wire tools and middleware). */
   agentMemoryStore?: AgentMemoryStore;
@@ -79,8 +75,7 @@ export class BullMQAgentWorker {
   private readonly subagents: Subagent[] | undefined;
   private readonly systemPrompt?: SystemMessageFields;
   private readonly getAgentConfig?: (agentId: string) => Promise<AgentConfig | undefined>;
-  private readonly skills: Skill[] | undefined;
-  private readonly embeddingModelOptions: ModelOptions;
+  private readonly embeddingModelOptions: ModelOptions | undefined;
 
   private readonly logger: AgentWorkerLogger;
   private readonly maxHistoryMessages: number | undefined;
@@ -96,7 +91,7 @@ export class BullMQAgentWorker {
   private documentRedisConnection: RedisConnection | null = null;
 
   constructor(options: BullMQAgentWorkerOptions) {
-    const { documentConnection, connection, chatModelOptions, subagents, systemPrompt, getAgentConfig, skills, embeddingModelOptions, logger, maxHistoryMessages, tools: customTools, enableAgentMemory, agentMemoryStore, enableSummarization, vectorStoreProvider, ...bullOptions } = options;
+    const { documentConnection, connection, chatModelOptions, subagents, systemPrompt, getAgentConfig, embeddingModelOptions, logger, maxHistoryMessages, tools: customTools, enableAgentMemory, agentMemoryStore, enableSummarization, vectorStoreProvider, ...bullOptions } = options;
     this.connection = connection;
     this.documentConnection = documentConnection;
     this.vectorStoreProvider = vectorStoreProvider;
@@ -104,7 +99,6 @@ export class BullMQAgentWorker {
     this.subagents = subagents;
     this.systemPrompt = systemPrompt;
     this.getAgentConfig = getAgentConfig;
-    this.skills = skills;
     this.embeddingModelOptions = embeddingModelOptions;
     this.logger = logger ?? createDefaultAgentWorkerLogger();
     this.maxHistoryMessages = maxHistoryMessages;
@@ -131,7 +125,7 @@ export class BullMQAgentWorker {
       queueOptions = { ...this.options, connection: await this.redisConnection.client };
     }
 
-    if (!this.vectorStoreProvider) {
+    if (!this.vectorStoreProvider && this.embeddingModelOptions) {
       const docConnection = this.documentConnection ?? this.connection;
       let documentClient: Redis | Cluster;
       if (docConnection === this.connection) {
@@ -147,27 +141,23 @@ export class BullMQAgentWorker {
         prefix: this.options.prefix,
       });
     }
+    const ragEnabled = this.vectorStoreProvider != null && this.embeddingModelOptions != null;
 
     const baseTools = [
-      createSearchKnowledgeTool(this.vectorStoreProvider),
       requestHumanInTheLoop,
       escalateToHuman,
-      ...(this.skills?.length ? [createLoadSkillTool(this.skills)] : []),
       ...(this.agentMemory ? [createSaveMemoryTool(), createDeleteMemoryTool()] : []),
       ...(this.customTools ?? []),
     ];
-    const systemPrompt = this.systemPrompt;
-    const getAgentConfig = this.getAgentConfig;
-    const skills = this.skills;
 
     const compiledGraph = await compileGraph({
       tools: baseTools,
       subagents: this.subagents,
-      systemPrompt,
-      getAgentConfig,
-      skills,
+      systemPrompt: this.systemPrompt,
+      getAgentConfig: this.getAgentConfig,
       agentMemory: this.agentMemory,
       summarization: this.summarization,
+      rag: ragEnabled && this.vectorStoreProvider ? { vectorStoreProvider: this.vectorStoreProvider } : undefined,
     });
 
     const redis = queueClient as Redis;
@@ -192,17 +182,19 @@ export class BullMQAgentWorker {
     );
     this.agentWorker.start();
 
-    this.ingestWorker = new IngestWorker(
-      { vectorStoreProvider: this.vectorStoreProvider, embeddingModelOptions: this.embeddingModelOptions, logger: this.logger },
-      queueOptions
-    );
-    this.ingestWorker.start();
+    if (ragEnabled && this.embeddingModelOptions) {
+      this.ingestWorker = new IngestWorker(
+        { vectorStoreProvider: this.vectorStoreProvider!, embeddingModelOptions: this.embeddingModelOptions, logger: this.logger },
+        queueOptions
+      );
+      this.ingestWorker.start();
 
-    this.searchWorker = new SearchWorker(
-      { vectorStoreProvider: this.vectorStoreProvider, embeddingModelOptions: this.embeddingModelOptions, logger: this.logger },
-      queueOptions
-    );
-    this.searchWorker.start();
+      this.searchWorker = new SearchWorker(
+        { vectorStoreProvider: this.vectorStoreProvider!, embeddingModelOptions: this.embeddingModelOptions, logger: this.logger },
+        queueOptions
+      );
+      this.searchWorker.start();
+    }
   }
 
   /**

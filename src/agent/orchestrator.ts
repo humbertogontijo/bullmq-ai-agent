@@ -2,8 +2,8 @@ import type { SystemMessageFields } from "@langchain/core/messages";
 import type { StructuredToolInterface } from "@langchain/core/tools";
 import { CompiledSubAgent } from "deepagents";
 import { initChatModel, SystemMessage } from "langchain";
-import type { AgentConfig, ModelOptions, Skill } from "../options.js";
-import { createDeepAgent } from "./createDeepAgent.js";
+import type { AgentConfig, ModelOptions } from "../options.js";
+import { createDeepAgent, type RagParams } from "./createDeepAgent.js";
 import type { AgentMemoryMiddlewareParams } from "./middlewares/agentMemory.js";
 import type { SummarizationMiddlewareParams } from "./middlewares/summarization.js";
 
@@ -22,7 +22,7 @@ export interface Subagent {
 
 export type CompileGraphOptions = OrchestratorContext
 
-/** Context bound when building the graph (worker-held tools, optional subagents, optional skills). */
+/** Context bound when building the graph (worker-held tools, optional subagents). */
 export interface OrchestratorContext {
   tools: StructuredToolInterface[];
   /** Subagent specs for the main agent; when run/resume sets subagentId, that subagent's runnable is created via createDeepAgent and invoked. */
@@ -31,12 +31,12 @@ export interface OrchestratorContext {
   systemPrompt?: SystemMessageFields;
   /** Async function returning per-agent config (systemPrompt, default model/temperature). Prepended at invoke time; run's chatModelOptions override. */
   getAgentConfig?: (agentId: string) => Promise<AgentConfig | undefined>;
-  /** Optional skills for progressive disclosure; descriptions are injected into system prompt, load_skill tool loads full content. */
-  skills?: Skill[];
   /** When set, enables cross-thread agent memory (persisted by agentId). */
   agentMemory?: AgentMemoryMiddlewareParams;
   /** When set, enables history summarization when thread exceeds historyThreshold messages. */
   summarization?: SummarizationMiddlewareParams;
+  /** When set (and embeddingModelOptions provided at run time), adds retrieve tool and RAG system prompt via createDeepAgent. */
+  rag?: RagParams;
 }
 
 /** Cache key for runnable cache (subagentId + model options). */
@@ -50,7 +50,7 @@ async function createRunnable(
   subagentId: string | undefined,
   chatModelOptions: ModelOptions
 ) {
-  const { tools, subagents, systemPrompt, agentMemory, summarization } = ctx;
+  const { tools, subagents, systemPrompt, agentMemory, summarization, rag } = ctx;
 
   const compiledSubagents = await Promise.all(subagents?.map(async (subagent) => {
     const subagentModel = subagent.model ?? chatModelOptions;
@@ -65,6 +65,7 @@ async function createRunnable(
       systemPrompt: new SystemMessage(subagent.systemPrompt),
       agentMemory,
       summarization,
+      rag,
     });
     return {
       name: subagent.name,
@@ -89,6 +90,7 @@ async function createRunnable(
     subagents: compiledSubagents,
     agentMemory,
     summarization,
+    rag,
   });
 }
 

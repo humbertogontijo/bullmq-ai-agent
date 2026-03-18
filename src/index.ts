@@ -52,7 +52,7 @@ export {
   DEFAULT_SUMMARIZATION_THRESHOLD,
 } from "./agent/middlewares/summarization.js";
 export type { SummarizationMiddlewareParams } from "./agent/middlewares/summarization.js";
-export type { AgentConfig, Skill } from "./options.js";
+export type { AgentConfig } from "./options.js";
 export { createAgentQueue } from "./queues/agentQueue.js";
 export { createIngestQueue } from "./queues/ingestQueue.js";
 export { createSearchQueue } from "./queues/searchQueue.js";

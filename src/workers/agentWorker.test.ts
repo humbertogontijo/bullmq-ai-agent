@@ -30,7 +30,6 @@ function createMockCompiledGraph(streamResult: { messages?: unknown[]; __interru
   return {
     getRunnable: vi.fn().mockResolvedValue({ invoke }),
     getAgentConfig: undefined,
-    getSkillsPrompt: undefined,
   };
 }
 
@@ -119,7 +118,7 @@ describe("AgentWorker.processJob", () => {
 
     it("rethrows non-GraphInterrupt errors", async () => {
       const runnable = { invoke: vi.fn().mockRejectedValue(new Error("Graph failed")) };
-      const compiledGraph = { getRunnable: vi.fn().mockResolvedValue(runnable), getAgentConfig: undefined, getSkillsPrompt: undefined };
+      const compiledGraph = { getRunnable: vi.fn().mockResolvedValue(runnable), getAgentConfig: undefined };
       const worker = await createWorker(compiledGraph);
       await expect(worker.processJob(mockJob(runJob))).rejects.toThrow("Graph failed");
     });
@@ -154,7 +153,6 @@ describe("AgentWorker.processJob", () => {
       const compiledGraph = {
         getRunnable: vi.fn().mockResolvedValue({ invoke: invokeFn }),
         getAgentConfig: undefined,
-        getSkillsPrompt: undefined,
       };
       const resumeJob: Pick<Job<AgentRunData, AgentJobResult>, "id" | "name" | "data"> = {
         id: "t1/1700000000002",
@@ -212,7 +210,6 @@ describe("AgentWorker.processJob", () => {
       const compiledGraph = {
         getRunnable: vi.fn().mockResolvedValue({ invoke: invokeFn }),
         getAgentConfig: undefined,
-        getSkillsPrompt: undefined,
       };
       const resumeToolJob: Pick<Job<AgentResumeToolData, AgentJobResult>, "id" | "name" | "data"> = {
         id: "t1/1700000000002",

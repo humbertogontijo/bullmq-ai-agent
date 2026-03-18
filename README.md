@@ -2,7 +2,7 @@
 
 Scalable AI agent orchestration powered by [BullMQ](https://docs.bullmq.io/) and [LangChain](https://js.langchain.com/).
 
-Define subagents, system prompts, and per-agent config (getAgentConfig), connect any LLM, and let BullMQ handle the rest — tool execution and Redis-backed reliability. Built-in tools include RAG (search knowledge) and human-in-the-loop (request approval).
+Define subagents, system prompts, and per-agent config (getAgentConfig), connect any LLM, and let BullMQ handle the rest — tool execution and Redis-backed reliability. Built-in tools include RAG (retrieve) and human-in-the-loop (request approval).
 
 ## Features
 
@@ -11,7 +11,7 @@ Define subagents, system prompts, and per-agent config (getAgentConfig), connect
 - **Thread history from job results** — No separate checkpointer; the worker builds conversation history from previous jobs in the same thread (job return values). Each run uses `threadId` and a unique `jobId` (`threadId/<snowflake>`) so older job results can be loaded and concatenated.
 - **Human-in-the-loop** — Built-in `request_human_approval` tool; the agent pauses and the worker returns the serialized state (messages). The client detects “resume needed” when the last message is an AI message with `request_human_approval` tool_calls, then calls `client.resumeTool(..., { content })`; the worker fetches the last job's state and builds the tool message.
 - **Resume = run with full messages** — Resuming after an interrupt is a normal `run()` with the full message list (e.g. previous result messages plus the human’s tool reply) ; the worker uses only those messages (no prior job history prepended).
-- **RAG** — Built-in `search_knowledge` tool; ingest documents per agent via `client.ingest()` and optional `VectorStoreProvider`
+- **RAG** — Built-in `retrieve` tool; ingest documents per agent via `client.ingest()` and optional `VectorStoreProvider`
 - **Redis-backed** — Queues in Redis; vector store uses [@langchain/redis](https://js.langchain.com/docs/integrations/vectorstores/redis) (Redis Stack recommended for RediSearch)
 - **Type-safe** — Full TypeScript; `ModelOptions`, `RunOptions`, `Subagent`, `AgentConfig`, `Skill`, and queue types exported
 
@@ -25,7 +25,7 @@ Define subagents, system prompts, and per-agent config (getAgentConfig), connect
      │    result.promise → AgentJobResult (messages)                             AgentWorker
      │    resumeTool(..., { content }) or run(..., { messages })                (LangGraph)
      │                                                                                │
-     │                                                                     tools: search_knowledge,
+     │                                                                     tools: retrieve,
      │                                                                     request_human_approval
      │                                                                                │
      │    ingest({ agentId, source }) ─────────────────────────────────────▶ Ingest Queue
@@ -55,7 +55,7 @@ Sessions are identified by `agentId` + `threadId`. On each `run`, the worker pre
 
 ### RAG (Retrieval Augmented Generation)
 
-When you call `client.ingest({ agentId, source })`, documents are queued and processed by the ingest worker. The built-in **search_knowledge** tool queries the vector store for that agent. Documents are stored per agent (index: `{agentId}`).
+When you call `client.ingest({ agentId, source })`, documents are queued and processed by the ingest worker. The built-in **retrieve** tool queries the vector store for that agent. Documents are stored per agent (index: `{agentId}`).
 
 - **Source format:** `{ type: 'url' | 'file' | 'text', content: string, metadata?: Record<string, unknown> }`. For `url`, `content` is the URL; for `file`, `content` is the file path; for `text`, `content` is the raw text.
 - **Embeddings:** Set `embeddingModelOptions` on the worker (e.g. OpenAI). The library does not read `process.env`; pass `apiKey` from your app or CLI.
@@ -63,7 +63,7 @@ When you call `client.ingest({ agentId, source })`, documents are queued and pro
 
 ### Extending with custom tools
 
-You can add CRM-specific or domain tools by passing a `tools` array to `BullMQAgentWorker`. These are merged with the built-in tools (search_knowledge, request_human_approval, escalate_to_human, load_skill).
+You can add CRM-specific or domain tools by passing a `tools` array to `BullMQAgentWorker`. These are merged with the built-in tools (retrieve, request_human_approval, escalate_to_human, load_skill).
 
 ```typescript
 import { tool } from "@langchain/core/tools";
@@ -122,7 +122,7 @@ const subagents: Subagent[] = [
   {
     name: "default",
     description: "General-purpose assistant",
-    systemPrompt: [{ type: "text", text: "You are a helpful assistant. Use search_knowledge when needed." }],
+    systemPrompt: [{ type: "text", text: "You are a helpful assistant. Use retrieve when needed." }],
   },
 ];
 ```
@@ -256,8 +256,7 @@ const flow = await flowProducer.add({
 | `documentConnection?` | `ConnectionOptions` | Redis for vector store; defaults to `connection`. |
 | `subagents?` | `Subagent[]` | Subagents with `name`, `description`, `systemPrompt`; optional `tools` and `model`. |
 | `getAgentConfig?` | `(agentId: string) => Promise<AgentConfig \| undefined>` | Per-agent config: systemPrompt, default model, temperature, maxTokens. |
-| `skills?` | `Skill[]` | Progressive disclosure: `name`, `description`, `content`; load_skill tool loads full content. |
-| `tools?` | `StructuredToolInterface[]` | Custom tools merged with built-in tools (search_knowledge, request_human_approval, escalate_to_human, load_skill). |
+| `tools?` | `StructuredToolInterface[]` | Custom tools merged with built-in tools (retrieve, request_human_approval, escalate_to_human). |
 | `embeddingModelOptions` | `ModelOptions` | **Required.** Used for RAG and ingest. |
 
 **Methods**
@@ -314,7 +313,7 @@ interface Subagent {
 
 The agent is configured with these tools (no need to register them yourself):
 
-- **search_knowledge** — RAG search over the agent’s ingested documents (when ingest worker and `embeddingModelOptions` are used).
+- **retrieve** — Retrieve relevant context from the agent’s ingested documents (when ingest worker and `embeddingModelOptions` are used).
 - **request_human_approval** — Pauses the run and returns an interrupt; resume with `resumeTool(..., { content })` or `run(..., { messages })`.
 - **escalate_to_human** — Full handoff to a human (no resume). Inspect the last AI message's `tool_calls` in `result.messages` for reason/context to route and display.
 ## Examples

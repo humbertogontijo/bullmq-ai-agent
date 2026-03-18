@@ -52,13 +52,6 @@ export interface AgentConfig {
   maxTokens?: number;
 }
 
-/** Skill for progressive disclosure: description in system prompt, content loaded on-demand via load_skill tool. */
-export interface Skill {
-  name: string;
-  description: string;
-  content: string | (() => Promise<string>);
-}
-
 /**
  * Schema for per-run context passed in graph configurable and via config.context to middlewares.
  * This is the stable contract for the agent worker: tools and getAgentConfig receive this via configurable.
@@ -77,7 +70,7 @@ export const runContextContextSchema = z.object({
   subagentId: z.string().optional(),
   /** Chat model options for this run (merged from worker default + getAgentConfig). */
   chatModelOptions: z.any().optional(),
-  /** Embedding model options (for search_knowledge and RAG). */
+  /** Embedding model options (for retrieve tool and RAG). */
   embeddingModelOptions: z.custom<ModelOptions>().optional(),
   /** Optional metadata from run/resume job data. CRM can pass owner, tenant, etc.; tools and getAgentConfig can read it. */
   metadata: z.record(z.unknown()).optional(),

@@ -27,7 +27,7 @@ export interface AgentWorkerParams {
   queueKeyPrefix: string;
   /** Default chat model; merged with getAgentConfig(agentId) per run (agent config overrides). */
   chatModelOptions: ModelOptions;
-  embeddingModelOptions: ModelOptions;
+  embeddingModelOptions?: ModelOptions;
   logger: AgentWorkerLogger;
   /** When set, passed to getPreviousReturnvalues Lua as max number of previous jobs to load. */
   maxHistoryMessages?: number;
@@ -40,7 +40,7 @@ export class AgentWorker {
   private readonly redis: RedisLike;
   private readonly queueKeyPrefix: string;
   private readonly chatModelOptions: ModelOptions;
-  private readonly embeddingModelOptions: ModelOptions;
+  private readonly embeddingModelOptions: ModelOptions | undefined;
   private readonly logger: AgentWorkerLogger;
   private readonly maxHistoryMessages: number | undefined;
   private readonly agentMemoryStore: AgentMemoryStore | undefined;
@@ -69,9 +69,6 @@ export class AgentWorker {
     const subagentId = data.subagentId;
 
     const systemParts: InstanceType<typeof SystemMessage>[] = [];
-    if (this.compiledGraph.getSkillsPrompt) {
-      systemParts.push(new SystemMessage(this.compiledGraph.getSkillsPrompt()));
-    }
 
     let effectiveChatModelOptions: ModelOptions = { ...this.chatModelOptions };
     if (this.compiledGraph.getAgentConfig) {

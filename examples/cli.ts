@@ -198,7 +198,7 @@ async function flowBasicChat(client: BullMQAgentClient, modelOptions: { chatMode
 }
 
 async function flowRag(client: BullMQAgentClient, modelOptions: { chatModelOptions: ModelOptions; embeddingModelOptions: ModelOptions }): Promise<void> {
-  clack.note("RAG: ingest documents, then ask questions that use search_knowledge.", "RAG");
+  clack.note("RAG: ingest documents, then ask questions that use the retrieve tool.", "RAG");
 
   const ingestNow = orExit(
     await clack.confirm({
@@ -230,7 +230,7 @@ async function flowRag(client: BullMQAgentClient, modelOptions: { chatModelOptio
   while (true) {
     const question = orExit(
       await clack.text({
-        message: "Question (uses RAG / search_knowledge)",
+        message: "Question (uses RAG / retrieve)",
         placeholder: "e.g. How does human-in-the-loop work?",
       })
     );
@@ -339,7 +339,7 @@ async function main(): Promise<void> {
           message: "What do you want to do?",
           options: [
             { value: "basic", label: "Basic chat", hint: "Free-form conversation" },
-            { value: "rag", label: "RAG", hint: "Ingest + ask questions with search_knowledge" },
+            { value: "rag", label: "RAG", hint: "Ingest + ask questions with retrieve" },
             { value: "hitl", label: "Human-in-the-loop", hint: "Request approval then resume" },
             { value: "memory", label: "Memory", hint: "Cross-thread memory: remember facts across conversations" },
             { value: "exit", label: "Exit" },
