@@ -126,8 +126,7 @@ export function createDeepAgent(
   ];
 
   const middleware = subagents.length > 0
-    ? baseMiddleware
-    : [
+    ? [
       createSubAgentMiddleware({
         defaultModel: model,
         defaultTools: toolsForSubAgents,
@@ -138,7 +137,8 @@ export function createDeepAgent(
         generalPurposeAgent: true,
       }),
       ...baseMiddleware,
-    ];
+    ]
+    : baseMiddleware;
 
   return createAgent({
     model,

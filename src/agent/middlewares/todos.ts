@@ -1,4 +1,4 @@
-import { AIMessage, ToolMessage } from "@langchain/core/messages";
+import { AIMessage, SystemMessage, ToolMessage } from "@langchain/core/messages";
 import { tool, type ToolRuntime } from "@langchain/core/tools";
 import { Command } from "@langchain/langgraph";
 import { createMiddleware } from "langchain";
@@ -44,9 +44,10 @@ function normalizeTodo(t: { content: string; status: TodoItem["status"]; fulfill
 }
 
 function mergeTodos(persisted: TodoItem[], required: TodoItem[]): TodoItem[] {
-  const existingContents = new Set(persisted.map((t) => t.content));
+  const active = persisted.filter((t) => t.status !== "completed");
+  const existingContents = new Set(active.map((t) => t.content));
   const missing = required.filter((t) => !existingContents.has(t.content));
-  return [...persisted.map(normalizeTodo), ...missing.map(normalizeTodo)];
+  return [...active.map(normalizeTodo), ...missing.map(normalizeTodo)];
 }
 
 /**
@@ -126,12 +127,21 @@ export function createTodoListMiddleware() {
           ? `${base} → ${t.fulfillment}`
           : base;
       });
-      const systemPrompt = TODO_LIST_MIDDLEWARE_PROMPT_BUILDER.build({
+      const todoPrompt = TODO_LIST_MIDDLEWARE_PROMPT_BUILDER.build({
         [TODO_LIST_LINES_PARAM]: lines.join("\n"),
       });
+      const existingContent =
+        typeof request.systemMessage.content === "string"
+          ? [{ type: "text" as const, text: request.systemMessage.content }]
+          : request.systemMessage.content;
       return handler({
         ...request,
-        systemMessage: request.systemMessage.concat("\n\n" + systemPrompt),
+        systemMessage: new SystemMessage({
+          content: [
+            ...existingContent,
+            { type: "text" as const, text: todoPrompt },
+          ],
+        }),
       });
     },
     afterModel: (state) => {
