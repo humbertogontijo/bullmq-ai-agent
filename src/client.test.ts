@@ -6,6 +6,7 @@ import type { StoredAgentState, StoredHumanMessage } from "./queues/types.js";
 
 const mockAdd = vi.fn();
 const mockGetJob = vi.fn();
+const mockEval = vi.fn();
 
 const mockQueueEventsOn = vi.fn();
 const mockQueueEventsOff = vi.fn();
@@ -20,11 +21,13 @@ vi.mock("bullmq", () => ({
 }));
 
 vi.mock("./queues/agentQueue.js", () => ({
-  createAgentQueue: () => ({
+  createAgentQueue: vi.fn((options?: { prefix?: string }) => ({
     add: mockAdd,
     getJob: mockGetJob,
     close: vi.fn().mockResolvedValue(undefined),
-  }),
+    client: Promise.resolve({ eval: mockEval }),
+    opts: { prefix: options?.prefix },
+  })),
 }));
 
 const mockIngestAdd = vi.fn();
@@ -70,6 +73,7 @@ describe("BullMQAgentClient", () => {
     client = new BullMQAgentClient(defaultClientOptions);
     mockAdd.mockReset();
     mockGetJob.mockReset();
+    mockEval.mockReset();
     mockQueueEventsOn.mockClear();
     mockQueueEventsOff.mockClear();
     mockGetJob.mockResolvedValue({ waitUntilFinished: vi.fn().mockResolvedValue({ messages: [] }) });
@@ -492,6 +496,40 @@ describe("BullMQAgentClient", () => {
         results: [{ content: "doc 1", metadata: {} }],
         count: 1,
       });
+    });
+  });
+
+  describe("deleteThreadHistory", () => {
+    it("runs clear script with default queue prefix and returns removed count", async () => {
+      mockEval.mockResolvedValue(3);
+
+      const n = await client.deleteThreadHistory("thread-1");
+
+      expect(n).toBe(3);
+      expect(mockEval).toHaveBeenCalledTimes(1);
+      expect(mockEval).toHaveBeenCalledWith(
+        expect.stringContaining("thread_jobs_key"),
+        2,
+        "bull:agent:thread-jobs:thread-1",
+        "bull:agent:completed",
+        "bull:agent:"
+      );
+    });
+
+    it("uses custom queue prefix from agent queue opts", async () => {
+      mockEval.mockResolvedValue(0);
+      const clientWithPrefix = new BullMQAgentClient({ ...defaultClientOptions, prefix: "app" });
+
+      await clientWithPrefix.deleteThreadHistory("t2");
+
+      expect(mockEval).toHaveBeenCalledWith(
+        expect.any(String),
+        2,
+        "app:agent:thread-jobs:t2",
+        "app:agent:completed",
+        "app:agent:"
+      );
+      await clientWithPrefix.close();
     });
   });
 

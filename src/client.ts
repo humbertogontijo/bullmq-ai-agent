@@ -1,6 +1,13 @@
 import type { FlowChildJob, Queue, QueueOptions } from "bullmq";
 import { QueueEvents } from "bullmq";
+import { clearThreadJobsAndRemoveJobsScript } from "./commands/index.js";
 import { QUEUE_NAMES } from "./options.js";
+import {
+  buildCompletedKey,
+  buildJobIdPrefix,
+  buildThreadJobsKey,
+  getQueueKeyPrefix,
+} from "./queues/queueKeys.js";
 import { snowflake } from "./utils/snowflake.js";
 import { createAgentQueue } from "./queues/agentQueue.js";
 import { createIngestQueue } from "./queues/ingestQueue.js";
@@ -404,6 +411,29 @@ export class BullMQAgentClient {
    */
   subscribeToAgentProgress(jobId: string, onProgress: (progress: JobProgress) => void): () => void {
     return subscribeToProgress(this.agentQueueEvents, jobId, onProgress);
+  }
+
+  /**
+   * Remove persisted thread history for `threadId`: clears the thread-jobs index and deletes the
+   * associated BullMQ job keys (same cleanup as summarization). Later `run` calls start with no prior
+   * messages; `resumeTool` will fail until a new run completes for this thread.
+   *
+   * @returns Number of job records removed from Redis.
+   */
+  async deleteThreadHistory(threadId: string): Promise<number> {
+    const queueKeyPrefix = getQueueKeyPrefix(this.agentQueue.opts.prefix);
+    const threadJobsKey = buildThreadJobsKey(queueKeyPrefix, QUEUE_NAMES.AGENT, threadId);
+    const completedKey = buildCompletedKey(queueKeyPrefix, QUEUE_NAMES.AGENT);
+    const jobIdPrefix = buildJobIdPrefix(queueKeyPrefix, QUEUE_NAMES.AGENT);
+    const redis = await this.agentQueue.client;
+    const removed = (await redis.eval(
+      clearThreadJobsAndRemoveJobsScript,
+      2,
+      threadJobsKey,
+      completedKey,
+      jobIdPrefix
+    )) as number;
+    return removed;
   }
 
   /**
