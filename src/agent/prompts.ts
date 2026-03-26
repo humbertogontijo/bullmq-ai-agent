@@ -247,18 +247,23 @@ export const TODO_LIST_MIDDLEWARE_PROMPT_BUILDER = new SystemPromptBuilder()
   .section(
     "todo_list",
     {
-      intro: "Use `write_todos` to track multi-step work and required information.",
+      intro:
+        "You have the `write_todos` tool to track information collection and multi-step objectives.",
       bullets: [
-        "Each reply should address the next pending item until all are completed; on the first reply, greet and ask for the first pending item.",
-        "Mark items completed as soon as you have each value; set **fulfillment** to the actual value (or empty when none).",
-        "Do not narrate completed items in the reply — ask for the next pending one.",
-        "Adjust the list as needed (add or remove items).",
+        "Every reply MUST ask about the next pending todo item unless all items are completed.",
+        "On your very first reply, greet the customer and immediately ask about the first pending item.",
+        "Mark each todo as completed as soon as the customer provides the value; do not batch completions.",
+        'Set the **fulfillment** field to the actual value obtained (e.g. "John Doe", "john@example.com"). Use empty string when there is no concrete result.',
+        "Do not confirm or narrate completed todos — just ask for the next pending item.",
+        "You may add new items or remove irrelevant ones as the conversation evolves.",
       ],
     },
   )
   .section(
     "current_todo_list",
-    "Current todo list:\n\n{" + TODO_LIST_LINES_PARAM + "}",
+    "Current todo list (work through these; use write_todos to update status):\n\n{" +
+      TODO_LIST_LINES_PARAM +
+      "}",
   );
 
 /**
@@ -267,10 +272,12 @@ export const TODO_LIST_MIDDLEWARE_PROMPT_BUILDER = new SystemPromptBuilder()
  * applicable to other multi-step workflows.
  */
 export const WRITE_TODOS_TOOL_DESCRIPTION = new ToolDescriptionBuilder()
-  .intro("Update the todo list; pass the full list with current statuses.")
+  .intro("Update the todo list. Pass the full list with current statuses.")
   .whenToUse(
-    "Completing todos when you have the requested information",
-    "Changing the list as the conversation evolves",
+    "Marking a todo as completed after the user provides the requested information",
+    "Adding new items or removing irrelevant ones as the conversation evolves",
   )
-  .whenNotToUse("Single-step requests with nothing to track")
+  .whenNotToUse(
+    "Single or trivial requests with no multi-step tracking needed",
+  )
   .build();
