@@ -62,10 +62,10 @@ export interface BullMQAgentWorkerOptions extends QueueOptions {
   /** Enable history summarization when thread exceeds threshold. When true, uses default options; pass an object to configure historyThreshold. */
   enableSummarization?: boolean | SummarizationMiddlewareParams;
   /**
-   * Callback that returns initial required todos for the agent before each run.
-   * Receives the job context (agentId, threadId, contactId, metadata) so todos can be
-   * tailored per agent or per thread. The TodoPersistenceMiddleware merges these with
-   * persisted todos from the previous job's return value, adding any missing ones.
+   * Callback that returns required todos for the agent. Receives the job context
+   * (agentId, threadId, contactId, metadata) so todos can be tailored per agent or
+   * thread. The todo list middleware merges these with graph state before each model
+   * call (including after tools), so the list stays aligned with external state.
    */
   getTodos?: GetTodosCallback;
 }

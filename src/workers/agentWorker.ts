@@ -33,7 +33,7 @@ export interface AgentWorkerParams {
   maxHistoryMessages?: number;
   /** Cross-thread memory store. Set by BullMQAgentWorker when enableAgentMemory is on. */
   agentMemoryStore?: AgentMemoryStore;
-  /** Callback returning initial required todos. Passed to RunContext for the TodoPersistenceMiddleware. */
+  /** Callback returning required todos. Passed to RunContext; merged before each model call by the todo list middleware. */
   getTodos?: GetTodosCallback;
 }
 

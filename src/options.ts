@@ -91,7 +91,7 @@ export const runContextContextSchema = z.object({
   maxHistoryMessages: z.number().optional(),
   /** Cross-thread memory store scoped by agentId. Set by worker when enableAgentMemory is on. */
   agentMemoryStore: z.custom<AgentMemoryStore>().optional(),
-  /** Callback returning initial required todos for the agent. Used by TodoPersistenceMiddleware. */
+  /** Callback returning required todos for the agent; merged with graph state before each model call. Used by todo list middleware. */
   getTodos: z.custom<GetTodosCallback>().optional(),
 });
 

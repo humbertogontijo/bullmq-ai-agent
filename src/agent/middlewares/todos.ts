@@ -1,4 +1,4 @@
-import { AIMessage, SystemMessage, ToolMessage } from "@langchain/core/messages";
+import { SystemMessage, ToolMessage } from "@langchain/core/messages";
 import { tool, type ToolRuntime } from "@langchain/core/tools";
 import { Command } from "@langchain/langgraph";
 import { createMiddleware } from "langchain";
@@ -30,9 +30,6 @@ const stateSchema = z.object({
 
 const WRITE_TODOS_TOOL_NAME = "write_todos";
 
-const PARALLEL_WRITE_TODOS_ERROR =
-  "Error: The `write_todos` tool should never be called multiple times in parallel. Please call it only once per model invocation to update the todo list.";
-
 /**
  * Merge persisted todos with required todos from the getTodos callback.
  * Required todos whose `content` is not already present in persisted todos
@@ -51,11 +48,11 @@ function mergeTodos(persisted: TodoItem[], required: TodoItem[]): TodoItem[] {
 }
 
 /**
- * Middleware that (1) seeds the `todos` state by merging user-defined required
- * todos (from the `getTodos` callback in RunContext) with persisted todos
- * loaded by the history middleware, (2) provides the `write_todos` tool so the
- * agent can update the list, and (3) injects todo list context and workflow
- * instructions when todos are present.
+ * Middleware that (1) merges user-defined required todos (from the `getTodos`
+ * callback in RunContext) with current graph state **before each model call** —
+ * so required items stay in sync after tools or other steps change context —
+ * (2) provides the `write_todos` tool so the agent can update the list, and
+ * (3) injects todo list context and workflow instructions when todos are present.
  *
  * Must be placed **after** `createHistoryMiddleware` (which loads persisted
  * todos from previous job return values into `state.todos`).
@@ -100,7 +97,7 @@ export function createTodoListMiddleware() {
     stateSchema,
     contextSchema: runContextContextSchema,
     tools: [writeTodos],
-    beforeAgent: async (state, runtime) => {
+    beforeModel: async (state, runtime) => {
       const ctx = runtime?.context as RunContext | undefined;
       if (!ctx?.getTodos) return;
 
@@ -143,35 +140,6 @@ export function createTodoListMiddleware() {
           ],
         }),
       });
-    },
-    afterModel: (state) => {
-      const messages = state.messages;
-      if (!messages || messages.length === 0) return;
-
-      const lastAiMsg = [...messages]
-        .reverse()
-        .find((msg) => AIMessage.isInstance(msg)) as AIMessage | undefined;
-      if (
-        !lastAiMsg?.tool_calls ||
-        lastAiMsg.tool_calls.length === 0
-      )
-        return;
-
-      const writeTodosCalls = lastAiMsg.tool_calls.filter(
-        (tc) => tc.name === WRITE_TODOS_TOOL_NAME
-      );
-      if (writeTodosCalls.length > 1) {
-        return {
-          messages: writeTodosCalls.map(
-            (tc) =>
-              new ToolMessage({
-                content: PARALLEL_WRITE_TODOS_ERROR,
-                tool_call_id: tc.id ?? "",
-                status: "error",
-              })
-          ),
-        };
-      }
     },
   });
 }

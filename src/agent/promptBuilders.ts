@@ -9,6 +9,14 @@
  *   .instructions("Answer only about Acme products.", "Prefer short answers.")
  *   .build();
  *
+ * @example Section with intro + bullets
+ * new SystemPromptBuilder()
+ *   .section("todo_list", {
+ *     intro: "Something about the section...",
+ *     bullets: ["point 1", "point 2"],
+ *   })
+ *   .build();
+ *
  * @example Tool description
  * const description = new ToolDescriptionBuilder()
  *   .intro("Hand off the conversation to a human agent.")
@@ -17,26 +25,73 @@
  *   .build();
  */
 
-function renderSectionContent(value: string | string[]): string {
+/** Object form: plain paragraph(s) plus an optional bullet list. */
+export type SectionContentObject = {
+  /** Plain text before the list; use `string[]` for multiple paragraphs (joined with blank lines). */
+  intro?: string | string[];
+  bullets?: string[];
+};
+
+/**
+ * Content for `.section()`, `.instructions()`, `.constraints()`, and tool `.section()`.
+ * - `string`: used as-is (trimmed).
+ * - `string[]`: each item is one bullet (optional leading `-` is normalized).
+ * - `{ intro?, bullets? }`: intro paragraph(s) without bullets, then a bullet list.
+ */
+export type SectionContent = string | string[] | SectionContentObject;
+
+/**
+ * Normalizes one line to a single Markdown list bullet. Strips an optional
+ * leading `-` so array items may omit or include `-` without inconsistent output.
+ */
+function normalizeBulletLine(line: string): string {
+  const t = line.trim();
+  if (t === "") return "";
+  return `- ${t.replace(/^\-\s*/, "")}`;
+}
+
+function isSectionContentObject(x: unknown): x is SectionContentObject {
+  return (
+    typeof x === "object" &&
+    x !== null &&
+    !Array.isArray(x) &&
+    ("intro" in x || "bullets" in x)
+  );
+}
+
+/** Renders {@link SectionContent} to a single Markdown string. */
+export function renderSectionContent(value: SectionContent): string {
+  if (typeof value === "string") return value.trim();
   if (Array.isArray(value)) {
-    return value.map((line) => (line.trimStart().startsWith("-") ? line : `- ${line}`)).join("\n");
+    return value.map(normalizeBulletLine).filter(Boolean).join("\n");
   }
-  return value;
+  const parts: string[] = [];
+  if (value.intro !== undefined) {
+    const introText = Array.isArray(value.intro)
+      ? value.intro.map((s) => s.trim()).filter(Boolean).join("\n\n")
+      : value.intro.trim();
+    if (introText) parts.push(introText);
+  }
+  if (value.bullets?.length) {
+    const bl = value.bullets.map(normalizeBulletLine).filter(Boolean).join("\n");
+    if (bl) parts.push(bl);
+  }
+  return parts.join("\n\n");
 }
 
 function ensureBullets(items: string[]): string[] {
-  return items.map((item) => (item.trimStart().startsWith("-") ? item : `- ${item}`));
+  return items.map(normalizeBulletLine).filter(Boolean);
 }
 
 // --- SystemPromptBuilder ---
 
 export class SystemPromptBuilder {
   private _role?: string;
-  private _instructions?: string | string[];
+  private _instructions?: SectionContent;
   private _objective?: string;
-  private _constraints?: string | string[];
+  private _constraints?: SectionContent;
   private _examples?: string | string[];
-  private _sections = new Map<string, string | string[]>();
+  private _sections = new Map<string, SectionContent>();
 
   /** Role and behavior: who the agent is, tone, domain rules. */
   role(value: string): this {
@@ -44,10 +99,12 @@ export class SystemPromptBuilder {
     return this;
   }
 
-  /** What to do, how to respond, constraints. Pass multiple items as separate args or one string. */
-  instructions(...value: (string | string[])[]): this {
-    const flat = value.flat();
-    this._instructions = flat.length === 1 && typeof flat[0] === "string" ? flat[0] : flat;
+  /**
+   * What to do, how to respond, constraints. Pass multiple strings for an all-bullet block,
+   * one string for prose, or `{ intro, bullets }` for a paragraph plus bullets (pass that object alone — do not mix with other arguments).
+   */
+  instructions(...value: (string | string[] | SectionContentObject)[]): this {
+    this._instructions = normalizeInstructionLikeArgs(value);
     return this;
   }
 
@@ -57,22 +114,28 @@ export class SystemPromptBuilder {
     return this;
   }
 
-  /** Optional: things the agent must not do or must always do. */
-  constraints(...value: (string | string[])[]): this {
-    const flat = value.flat();
-    this._constraints = flat.length === 1 && typeof flat[0] === "string" ? flat[0] : flat;
+  /**
+   * Optional: things the agent must not do or must always do.
+   * Same shapes as {@link instructions} (including `{ intro, bullets }` as the only argument when used).
+   */
+  constraints(...value: (string | string[] | SectionContentObject)[]): this {
+    this._constraints = normalizeInstructionLikeArgs(value);
     return this;
   }
 
-  /** Optional: example interactions or outputs. */
+  /** Optional: example interactions or outputs (joined with newlines when an array; no auto-bullets). */
   examples(...value: (string | string[])[]): this {
     const flat = value.flat();
     this._examples = flat.length === 1 && typeof flat[0] === "string" ? flat[0] : flat;
     return this;
   }
 
-  /** Optional: custom XML-tagged section. Tag name without angle brackets (e.g. "primary_objective"). Content may include placeholders like {name} for build(params). */
-  section(tag: string, content: string | string[]): this {
+  /**
+   * Optional: custom XML-tagged section. Tag name without angle brackets (e.g. "primary_objective").
+   * Content may include placeholders like {name} for build(params).
+   * Use a string, a string array (all bullets), or `{ intro, bullets }` for prose plus a list.
+   */
+  section(tag: string, content: SectionContent): this {
     const safeTag = tag.replace(/[<>/\\]/g, "").trim();
     if (safeTag) this._sections.set(safeTag, content);
     return this;
@@ -122,6 +185,21 @@ export class SystemPromptBuilder {
   }
 }
 
+function normalizeInstructionLikeArgs(
+  value: (string | string[] | SectionContentObject)[],
+): SectionContent | undefined {
+  const flat = value.flat();
+  if (flat.length === 0) return undefined;
+  if (flat.length === 1 && isSectionContentObject(flat[0])) {
+    return flat[0];
+  }
+  if (flat.length === 1 && typeof flat[0] === "string") {
+    return flat[0];
+  }
+  const stringsOnly = flat.filter((x): x is string => typeof x === "string");
+  return stringsOnly;
+}
+
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -136,7 +214,7 @@ export class ToolDescriptionBuilder {
   private _whenNotToUse: string[] = [];
   private _howToUse: string[] = [];
   private _examples: ToolExample[] = [];
-  private _extraSections = new Map<string, string[]>();
+  private _extraSections = new Map<string, SectionContent>();
 
   /** One or two sentences: what the tool does. */
   intro(value: string): this {
@@ -168,9 +246,15 @@ export class ToolDescriptionBuilder {
     return this;
   }
 
-  /** Optional: extra Markdown section (e.g. "Scopes"). Inserted before "When to Use". */
-  section(heading: string, lines: string[]): this {
-    if (heading && lines.length) this._extraSections.set(heading, lines);
+  /**
+   * Optional: extra Markdown section (e.g. "Scopes"). Inserted before "When to Use".
+   * Same {@link SectionContent} shapes as {@link SystemPromptBuilder.section}.
+   */
+  section(heading: string, content: SectionContent): this {
+    if (!heading.trim()) return this;
+    const rendered = renderSectionContent(content).trim();
+    if (!rendered) return this;
+    this._extraSections.set(heading, content);
     return this;
   }
 
@@ -182,10 +266,10 @@ export class ToolDescriptionBuilder {
       lines.push(this._intro.trim());
     }
 
-    for (const [heading, sectionLines] of this._extraSections) {
+    for (const [heading, sectionValue] of this._extraSections) {
       lines.push("");
       lines.push(`## ${heading}`);
-      lines.push(...ensureBullets(sectionLines));
+      lines.push(renderSectionContent(sectionValue));
     }
 
     if (this._whenToUse.length > 0) {

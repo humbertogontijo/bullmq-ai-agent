@@ -34,8 +34,8 @@ export type { BullMQAgentWorkerOptions } from "./worker.js";
 export { createDefaultAgentWorkerLogger, QUEUE_NAMES, runContextContextSchema } from "./options.js";
 export type { AgentWorkerLogger, GetTodosCallback, ModelOptions, RunContext } from "./options.js";
 
-export { SystemPromptBuilder, ToolDescriptionBuilder } from "./agent/promptBuilders.js";
-export type { ToolExample } from "./agent/promptBuilders.js";
+export { renderSectionContent, SystemPromptBuilder, ToolDescriptionBuilder } from "./agent/promptBuilders.js";
+export type { SectionContent, SectionContentObject, ToolExample } from "./agent/promptBuilders.js";
 export { compileGraph } from "./agent/compile.js";
 export type { Subagent } from "./agent/orchestrator.js";
 export {
