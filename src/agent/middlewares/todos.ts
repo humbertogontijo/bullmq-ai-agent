@@ -76,8 +76,9 @@ function mergeTodos(persisted: TodoItem[], required: TodoItem[]): TodoItem[] {
  * persisted state plus the current required slice from the spec via {@link resolveTodos} and
  * {@link flattenTodoSequence}); (3) provides `write_todos` and injects todo prompts.
  *
- * Top-level **TodoItem** entries do not unlock later siblings until completed; **TodoItemsGraph**
- * uses `items` then `next` (sequential stages) with the same rule inside each segment.
+ * Top-level **TodoSequenceSpec** entries are **parallel** (all current slices visible). Inside a
+ * **TodoItemsGraph**, `items` are sequential (later steps stay hidden until prior steps complete), then
+ * `next` runs.
  *
  * Must be placed **after** `createHistoryMiddleware` (which loads persisted
  * todos from previous job return values into `state.todos`).

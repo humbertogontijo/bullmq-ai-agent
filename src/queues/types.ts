@@ -51,21 +51,19 @@ function normalizeTodoSpecNode(node: TodoItem | TodoItemsGraph): TodoItem | Todo
   return node;
 }
 
+function buildCompletedSet(persisted: TodoItem[]): Set<string> {
+  return new Set(persisted.filter((t) => t.status === "completed").map((t) => t.content));
+}
+
 /**
- * Returns the **current stage** of the spec: skips completed leaves, drops graphs whose inner work is
- * done, and stops before later siblings until the first incomplete item is finished. Then
- * {@link flattenTodoSequence} turns this into a flat list for merging with persisted todos.
- *
- * **Duplicate `content` in `persisted`:** if any row with that `content` is `completed`, the leaf is
- * treated as done (not “last row wins”).
+ * **Sequential siblings** (e.g. {@link TodoItemsGraph.items}): only the first incomplete segment is
+ * active; later siblings stay hidden until prior work is done.
  */
-export function resolveTodos(
+function resolveTodosSequential(
   nodes: readonly (TodoItem | TodoItemsGraph)[],
   persisted: TodoItem[],
+  completedContents: Set<string>,
 ): TodoSequenceSpec {
-  const completedContents = new Set(
-    persisted.filter((t) => t.status === "completed").map((t) => t.content),
-  );
   function isDone(content: string): boolean {
     return completedContents.has(content);
   }
@@ -74,16 +72,16 @@ export function resolveTodos(
     if (isTodoItemsGraph(node)) {
       if (node.items.length === 0) {
         if (node.next) {
-          return resolveTodos([node.next], persisted);
+          return resolveTodosSequential([node.next], persisted, completedContents);
         }
         continue;
       }
-      const inner = resolveTodos(node.items, persisted);
+      const inner = resolveTodosSequential(node.items, persisted, completedContents);
       if (inner.length > 0) {
         return [{ items: inner, next: undefined }];
       }
       if (node.next) {
-        return resolveTodos([node.next], persisted);
+        return resolveTodosSequential([node.next], persisted, completedContents);
       }
       continue;
     }
@@ -92,6 +90,54 @@ export function resolveTodos(
     }
   }
   return [];
+}
+
+/**
+ * **Parallel siblings** (top-level {@link TodoSequenceSpec}): each node contributes its current slice,
+ * so the result has one segment per still-relevant input node (same length as `nodes` when every node
+ * still has work and none are completed graphs-only).
+ *
+ * **Sequential** `items` inside a {@link TodoItemsGraph} still use {@link resolveTodosSequential}: only
+ * the first incomplete step in `items` is active until it is completed.
+ *
+ * **Duplicate `content` in `persisted`:** if any row with that `content` is `completed`, the leaf is
+ * treated as done (not “last row wins”).
+ */
+export function resolveTodos(
+  nodes: readonly (TodoItem | TodoItemsGraph)[],
+  persisted: TodoItem[],
+): TodoSequenceSpec {
+  const completedContents = buildCompletedSet(persisted);
+  const out: TodoSequenceSpec = [];
+
+  function isDone(content: string): boolean {
+    return completedContents.has(content);
+  }
+
+  for (const node of nodes) {
+    if (isTodoItemsGraph(node)) {
+      if (node.items.length === 0) {
+        if (node.next) {
+          out.push(...resolveTodos([node.next], persisted));
+        }
+        continue;
+      }
+      const inner = resolveTodosSequential(node.items, persisted, completedContents);
+      if (inner.length > 0) {
+        out.push({ items: inner, next: undefined });
+        continue;
+      }
+      if (node.next) {
+        out.push(...resolveTodos([node.next], persisted));
+        continue;
+      }
+      continue;
+    }
+    if (!isDone(node.content)) {
+      out.push(node);
+    }
+  }
+  return out;
 }
 
 /**
