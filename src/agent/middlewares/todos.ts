@@ -5,7 +5,14 @@ import { createMiddleware } from "langchain";
 import { z } from "zod";
 
 import { runContextContextSchema, type RunContext } from "../../options.js";
-import type { TodoItem } from "../../queues/types.js";
+import {
+  flattenTodoSequence,
+  normalizeTodoSequenceSpec,
+  resolveTodos,
+  type TodoItem,
+  type TodoItemsGraph,
+  type TodoSequenceSpec,
+} from "../../queues/types.js";
 import {
   TODO_LIST_LINES_PARAM,
   TODO_LIST_MIDDLEWARE_PROMPT_BUILDER,
@@ -24,35 +31,53 @@ const TodoSchema = z.object({
     ),
 });
 
+const TodoItemsGraphSchema: z.ZodType<TodoItemsGraph> = z.lazy(() =>
+  z.object({
+    items: z.array(z.union([TodoSchema, TodoItemsGraphSchema])),
+    next: z.union([TodoSchema, TodoItemsGraphSchema]).optional(),
+  }),
+);
+const TodoSequenceSpecSchema = z.array(z.union([TodoSchema, TodoItemsGraphSchema]));
+
 const stateSchema = z.object({
   todos: z.array(TodoSchema).default([]),
+  /** Raw `getTodos` tree; set in `beforeAgent` and kept for the run so each `beforeModel` can merge it into `todos`. */
+  todosRequiredSpec: TodoSequenceSpecSchema.optional(),
 });
 
 const WRITE_TODOS_TOOL_NAME = "write_todos";
 
 /**
- * Merge persisted todos with required todos from the getTodos callback.
- * Required todos whose `content` is not already present in persisted todos
- * are appended as `"pending"`. Persisted todos (including completed) are
- * always preserved.
+ * Resolves the spec against completion state, then merges: {@link mergeTodos} keeps **completed**
+ * rows from `persisted` and appends **current required** leaves from the spec (see {@link mergeTodos}).
  */
-function normalizeTodo(t: { content: string; status: TodoItem["status"]; fulfillment?: string }): TodoItem {
-  return { ...t, fulfillment: t.fulfillment ?? "" };
-}
-
-function mergeTodos(persisted: TodoItem[], required: TodoItem[]): TodoItem[] {
-  const active = persisted.filter((t) => t.status !== "completed");
-  const existingContents = new Set(active.map((t) => t.content));
-  const missing = required.filter((t) => !existingContents.has(t.content));
-  return [...active.map(normalizeTodo), ...missing.map(normalizeTodo)];
+function mergeFromSpec(spec: TodoSequenceSpec | undefined, persisted: TodoItem[]): TodoItem[] {
+  if (!spec || spec.length === 0) return persisted;
+  const coerced = normalizeTodoSequenceSpec(spec);
+  const resolved = resolveTodos(coerced, persisted);
+  const flattened = flattenTodoSequence(resolved);
+  return mergeTodos(persisted, flattened);
 }
 
 /**
- * Middleware that (1) merges user-defined required todos (from the `getTodos`
- * callback in RunContext) with current graph state **before each model call** —
- * so required items stay in sync after tools or other steps change context —
- * (2) provides the `write_todos` tool so the agent can update the list, and
- * (3) injects todo list context and workflow instructions when todos are present.
+ * **Completed history + current required from spec:** all completed todos from `persisted` (by row),
+ * then any `required` item whose `content` is not already among those completed. In-flight work is not
+ * listed here; it comes from the spec slice produced by {@link resolveTodos} / {@link flattenTodoSequence}.
+ */
+function mergeTodos(persisted: TodoItem[], required: TodoItem[]): TodoItem[] {
+  const requiredContents = new Set(required.map((t) => t.content));
+  const completedHistory = persisted.filter((t) => t.status === "completed" && !requiredContents.has(t.content));
+  return [...completedHistory, ...required];
+}
+
+/**
+ * Middleware that (1) calls `getTodos` **once** in `beforeAgent` and stores the raw spec in
+ * `todosRequiredSpec`; (2) on each `beforeModel`, merges that spec into `todos` (completed history from
+ * persisted state plus the current required slice from the spec via {@link resolveTodos} and
+ * {@link flattenTodoSequence}); (3) provides `write_todos` and injects todo prompts.
+ *
+ * Top-level **TodoItem** entries do not unlock later siblings until completed; **TodoItemsGraph**
+ * uses `items` then `next` (sequential stages) with the same rule inside each segment.
  *
  * Must be placed **after** `createHistoryMiddleware` (which loads persisted
  * todos from previous job return values into `state.todos`).
@@ -65,16 +90,18 @@ export function createTodoListMiddleware() {
 
   const writeTodos = tool(
     (
-      { todos }: { todos: Array<{ content: string; status: string; fulfillment: string }> },
+      { todos }: { todos: TodoItem[] },
       runtime: ToolRuntime<z.infer<typeof stateSchema>>
     ) => {
       const toolCallId = runtime.toolCall?.id ?? "";
+      const prior = runtime.state?.todos ?? [];
+      const mergedTodos = mergeTodos(prior, todos);
       return new Command({
         update: {
-          todos,
+          todos: mergedTodos,
           messages: [
             new ToolMessage({
-              content: `Updated todo list to ${JSON.stringify(todos)}`,
+              content: `Updated todo list to ${JSON.stringify(mergedTodos)}`,
               tool_call_id: toolCallId,
             }),
           ],
@@ -97,22 +124,25 @@ export function createTodoListMiddleware() {
     stateSchema,
     contextSchema: runContextContextSchema,
     tools: [writeTodos],
-    beforeModel: async (state, runtime) => {
+    beforeAgent: async (_state, runtime) => {
       const ctx = runtime?.context as RunContext | undefined;
       if (!ctx?.getTodos) return;
 
-      const persisted: TodoItem[] = state?.todos ?? [];
-      const required = await ctx.getTodos({
+      const todosRequiredSpec = await ctx.getTodos({
         agentId: ctx.agentId,
         threadId: ctx.thread_id,
         contactId: ctx.contactId,
         metadata: ctx.metadata,
       });
 
-      const todos = mergeTodos(persisted, required);
-      if (todos.length > 0) {
-        return { todos };
-      }
+      return { todosRequiredSpec };
+    },
+    beforeModel: async (state) => {
+      const spec = state?.todosRequiredSpec ?? [];
+      if (spec.length === 0) return;
+
+      const persisted = state?.todos ?? [];
+      return { todos: mergeFromSpec(spec, persisted) };
     },
     wrapModelCall: (request, handler) => {
       const todos = request.state?.todos ?? [];
@@ -120,7 +150,7 @@ export function createTodoListMiddleware() {
 
       const lines = todos.map((t, i) => {
         const base = `${i + 1}. [${t.status}] ${t.content}`;
-        return t.status === "completed" && t.fulfillment !== ""
+        return t.status === "completed" && t.fulfillment
           ? `${base} → ${t.fulfillment}`
           : base;
       });

@@ -8,7 +8,7 @@ import * as clack from "@clack/prompts";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { MessageRole, TodoItem } from "bullmq-ai-agent";
+import type { MessageRole, TodoItem, TodoItemsGraph, TodoSequenceSpec } from "bullmq-ai-agent";
 import { BullMQAgentClient, BullMQAgentWorker, isResumeRequired } from "bullmq-ai-agent";
 import type { ModelOptions } from "bullmq-ai-agent";
 import type { AgentJobResult, StoredAgentState, StoredMessage } from "bullmq-ai-agent";
@@ -84,7 +84,7 @@ const defaultOptions = {
  */
 export async function startWorkers(
   modelOptions: { chatModelOptions: ModelOptions; embeddingModelOptions: ModelOptions },
-  options?: { getTodos?: (ctx: { agentId: string; threadId: string }) => TodoItem[] | Promise<TodoItem[]> },
+  options?: { getTodos?: (ctx: { agentId: string; threadId: string }) => TodoSequenceSpec | Promise<TodoSequenceSpec> },
 ): Promise<BullMQAgentWorker> {
   const workers = new BullMQAgentWorker({ ...defaultOptions, ...modelOptions, enableAgentMemory: true, getTodos: options?.getTodos });
   await workers.start();
@@ -380,14 +380,19 @@ async function main(): Promise<void> {
   const modelOptions = getModelOptions(apiKey);
 
   const workers = await startWorkers(modelOptions, {
-    getTodos: ({ threadId }) => {
+    getTodos: ({ threadId }): TodoSequenceSpec => {
       if (!threadId.startsWith("todos-thread-")) return [];
-      return [
-        { content: "Get the client's full name", status: "pending" as const, fulfillment: "" },
-        { content: "Get the client's email address", status: "pending" as const, fulfillment: "" },
-        { content: "Get the client's shipping address", status: "pending" as const, fulfillment: "" },
-        { content: "Confirm all details with the client", status: "pending" as const, fulfillment: "" },
-      ];
+      const p = (content: string): TodoItem => ({
+        content,
+        status: "pending",
+        fulfillment: "",
+      });
+      /** Graph segment for CLI testing: `items` first, then `next` as a single todo item after both are done. */
+      const contactGraph: TodoItemsGraph = {
+        items: [p("Get the client's email address"), p("Get the client's shipping address")],
+        next: p("Confirm all details with the client"),
+      };
+      return [p("Get the client's full name"), contactGraph];
     },
   });
   const client = new BullMQAgentClient({ ...defaultOptions });

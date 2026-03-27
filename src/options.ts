@@ -3,15 +3,19 @@ import { Job } from "bullmq";
 import type { Redis } from "ioredis";
 import { z } from "zod";
 import type { AgentMemoryStore } from "./memory/AgentMemoryStore.js";
-import type { TodoItem } from "./queues/types.js";
+import type { TodoSequenceSpec } from "./queues/types.js";
 
-/** Callback signature for providing initial todos per run. */
+/**
+ * Callback returning the canonical ordered todo spec for this run (flat items and/or nested graphs).
+ * Order is preserved when merging with persisted state so the next item after a completion is correct
+ * even when the external list has not caught up yet.
+ */
 export type GetTodosCallback = (ctx: {
   agentId: string;
   threadId: string;
   contactId?: string;
   metadata?: Record<string, unknown>;
-}) => TodoItem[] | Promise<TodoItem[]>;
+}) => TodoSequenceSpec | Promise<TodoSequenceSpec>;
 
 export interface AgentWorkerLogger {
   error: (msg: string, err?: Error) => void;

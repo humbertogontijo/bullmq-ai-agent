@@ -272,7 +272,9 @@ export const TODO_LIST_MIDDLEWARE_PROMPT_BUILDER = new SystemPromptBuilder()
  * applicable to other multi-step workflows.
  */
 export const WRITE_TODOS_TOOL_DESCRIPTION = new ToolDescriptionBuilder()
-  .intro("Update the todo list. Pass the full list with current statuses.")
+  .intro(
+    "Update the todo list with current statuses. You may pass only the rows you are changing; earlier completed items stay in state if omitted. Never downgrade a completed item to pending unless the user explicitly invalidates that answer.",
+  )
   .whenToUse(
     "Marking a todo as completed after the user provides the requested information",
     "Adding new items or removing irrelevant ones as the conversation evolves",

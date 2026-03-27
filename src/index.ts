@@ -57,7 +57,22 @@ export type { AgentConfig } from "./options.js";
 export { createAgentQueue } from "./queues/agentQueue.js";
 export { createIngestQueue } from "./queues/ingestQueue.js";
 export { createSearchQueue } from "./queues/searchQueue.js";
-export type { AgentJobResult, StoredAgentState, IngestJobResult, SearchJobResult, StoredMessage, TodoItem } from "./queues/types.js";
+export type {
+  AgentJobResult,
+  StoredAgentState,
+  IngestJobResult,
+  SearchJobResult,
+  StoredMessage,
+  TodoItem,
+  TodoItemsGraph,
+  TodoSequenceSpec,
+} from "./queues/types.js";
+export {
+  flattenTodoSequence,
+  isTodoItemsGraph,
+  normalizeTodoSequenceSpec,
+  resolveTodos,
+} from "./queues/types.js";
 export { getLastRequestHumanApprovalToolCall, isResumeRequired } from "./utils/message.js";
 export {
   mapChatMessagesToStoredMessages,
