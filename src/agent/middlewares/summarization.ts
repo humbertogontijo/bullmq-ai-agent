@@ -44,17 +44,17 @@ export function createSummarizationMiddleware(params: SummarizationMiddlewarePar
     name: "SummarizationMiddleware",
     stateSchema: z.object({
       /** Can override historyMessages set by history middleware with a single summary message. */
-      historyMessages: z.array(z.any()).optional(),
+      historyMessages: z.array(z.custom<BaseMessage>()).optional(),
     }),
     contextSchema: runContextContextSchema,
     beforeAgent: async (state, runtime) => {
-      const ctx = runtime?.context as RunContext | undefined;
+      const ctx = runtime?.context;
       const { redis, thread_id, queueKeyPrefix, chatModelOptions } = ctx ?? {};
       if (!redis || !thread_id || !queueKeyPrefix || !chatModelOptions) {
         return;
       }
 
-      const historyMessages = (state?.historyMessages ?? []) as BaseMessage[];
+      const historyMessages = (state?.historyMessages ?? []);
       if (historyMessages.length < threshold) {
         return;
       }
@@ -72,7 +72,7 @@ export function createSummarizationMiddleware(params: SummarizationMiddlewarePar
         messages: formattedMessages,
       });
       const response = await model.invoke([new HumanMessage(formattedPrompt)]);
-      const content = (response as { content?: string })?.content;
+      const content = response.content;
       const summary = typeof content === "string" ? content : String(content ?? "");
 
       const threadJobsKey = buildThreadJobsKey(queueKeyPrefix, QUEUE_NAMES.AGENT, thread_id);

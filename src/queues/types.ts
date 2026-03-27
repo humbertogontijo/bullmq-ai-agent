@@ -190,7 +190,10 @@ export interface StoredSystemMessage {
 
 export type StoredMessage = StoredToolMessage | StoredHumanMessage | StoredAIMessage | StoredRemoveMessage | StoredSystemMessage
 
-export interface AgentRunData {
+/**
+ * Shared fields for agent queue job payloads ({@link AgentRunData}, {@link AgentResumeToolData}).
+ */
+export interface AgentJobBaseData {
   agentId: string;
   threadId: string;
   /** Contact id (end-user identity). Scopes per-contact memories so personal data never leaks across users. Defaults to threadId when omitted. */
@@ -199,23 +202,31 @@ export interface AgentRunData {
   subagentId?: string;
   /** Optional run-level metadata (e.g. owner, tenant). Passed to configurable for tools and getAgentConfig. */
   metadata?: Record<string, unknown>;
+  /** When "suggest", the AI response is converted into a suggest_response tool call for human review. Use resumeTool to approve/edit. */
+  mode?: "auto" | "suggest";
+}
+
+/**
+ * Client options shared by `run` / `resumeTool` / flow builders: same fields as {@link AgentJobBaseData}
+ * except `agentId` and `threadId` (those are separate arguments on the client).
+ */
+export type AgentClientJobBaseOptions = Omit<AgentJobBaseData, "agentId" | "threadId">;
+
+export interface AgentRunData extends AgentJobBaseData {
   input: {
     messages: StoredMessage[];
   };
 }
 
 /** Agent queue job data for resumeTool: worker builds tool message from last job's AI tool_call_id. */
-export interface AgentResumeToolData {
-  agentId: string;
-  threadId: string;
-  /** Contact id (end-user identity). Scopes per-contact memories so personal data never leaks across users. Defaults to threadId when omitted. */
-  contactId?: string;
-  /** Human response content for the request_human_approval tool. */
+export interface AgentResumeToolData extends AgentJobBaseData {
+  /** Human response content for the pending tool call. */
   content: string;
-  /** Pass when resuming so the same runnable (main or subagent) is used. */
-  subagentId?: string;
-  /** Optional run-level metadata. */
-  metadata?: Record<string, unknown>;
+  /**
+   * When true, persist `content` as the final assistant message and skip graph invocation.
+   * Use for suggest mode approval or any flow where the human's text should be saved as-is without a model turn.
+   */
+  commitOnly?: boolean;
 }
 
 /** Agent queue job data (run or resumeTool). Discriminator is job name: "run" | "resumeTool". */

@@ -92,6 +92,21 @@ export const REQUEST_HUMAN_APPROVAL_TOOL_DESCRIPTION = new ToolDescriptionBuilde
 export const REQUEST_HUMAN_APPROVAL_REASON_DESCRIPTION =
   "Message or question to show the human (e.g. approval request, clarification question).";
 
+// --- Tool: suggest_response (schema reference; worker injects synthetic calls in suggest mode) ---
+
+export const SUGGEST_RESPONSE_TOOL_DESCRIPTION = new ToolDescriptionBuilder()
+  .intro(
+    "Draft reply for a human agent to approve, edit, or reject before it is sent to the end user.",
+  )
+  .section(
+    "Default behavior",
+    "The compiled agent does not register this tool. In `mode: \"suggest\"`, the worker wraps the model's plain-text reply in a synthetic `suggest_response` tool call with this schema so clients use `resumeTool` to commit the final text.",
+  )
+  .build();
+
+export const SUGGEST_RESPONSE_SUGGESTION_DESCRIPTION =
+  "Proposed reply text for the human agent to review (approve as-is, edit, or replace).";
+
 // --- Tool: save_memory ---
 
 export const SAVE_MEMORY_TOOL_DESCRIPTION = new ToolDescriptionBuilder()

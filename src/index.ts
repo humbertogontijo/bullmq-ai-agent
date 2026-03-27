@@ -58,6 +58,8 @@ export { createAgentQueue } from "./queues/agentQueue.js";
 export { createIngestQueue } from "./queues/ingestQueue.js";
 export { createSearchQueue } from "./queues/searchQueue.js";
 export type {
+  AgentClientJobBaseOptions,
+  AgentJobBaseData,
   AgentJobResult,
   StoredAgentState,
   IngestJobResult,
@@ -73,7 +75,15 @@ export {
   normalizeTodoSequenceSpec,
   resolveTodos,
 } from "./queues/types.js";
-export { getLastRequestHumanApprovalToolCall, isResumeRequired } from "./utils/message.js";
+export {
+  buildCommitOnlyResumeResult,
+  convertToSuggestion,
+  suggestion,
+  SUGGEST_RESPONSE_TOOL_NAME,
+} from "./agent/tools/suggestion.js";
+export { ESCALATE_TO_HUMAN_TOOL_NAME, escalateToHuman } from "./agent/tools/escalateToHuman.js";
+export { REQUEST_HUMAN_APPROVAL_TOOL_NAME, requestHumanInTheLoop } from "./agent/tools/humanInTheLoop.js";
+export { getLastRequestHumanApprovalToolCall, getSuggestionContent, isResumeRequired, isSuggestion } from "./utils/message.js";
 export {
   mapChatMessagesToStoredMessages,
   mapStoredMessageToChatMessage,

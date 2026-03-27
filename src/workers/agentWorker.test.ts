@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Job } from "bullmq";
 import { AgentWorker } from "./agentWorker.js";
 import { AIMessage, ToolMessage } from "@langchain/core/messages";
-import type { AgentRunData, AgentJobResult, AgentResumeToolData } from "../queues/types.js";
+import type { AgentRunData, AgentJobResult, AgentResumeToolData, StoredAIMessage } from "../queues/types.js";
 import type { CompiledGraph } from "../agent/compile.js";
 import { compileGraph } from "../agent/compile.js";
 import { createDefaultAgentWorkerLogger } from "../options.js";
@@ -230,6 +230,46 @@ describe("AgentWorker.processJob", () => {
       expect(ToolMessage.isInstance(lastMessage)).toBe(true);
       expect(lastMessage.tool_call_id).toBe("call_approval_1");
       expect(lastMessage.content).toBe("Yes, approved");
+      expect(mockRedis.zadd).toHaveBeenCalled();
+    });
+
+    it("commitOnly skips graph invoke and persists content as final AI message", async () => {
+      const lastJobMessages = [
+        { type: "human", data: { content: "Hello", name: undefined, tool_call_id: undefined } },
+        {
+          type: "ai",
+          data: {
+            content: "",
+            tool_calls: [{ id: "call_s1", name: "suggest_response", args: { suggestion: "Draft reply" } }],
+          },
+        },
+      ];
+      const lastJobReturnValue = JSON.stringify({ messages: lastJobMessages, todos: [] });
+      vi.mocked(mockRedis.eval).mockResolvedValue(["t1/1700000000001", lastJobReturnValue]);
+
+      const invokeFn = vi.fn();
+      const compiledGraph = {
+        getRunnable: vi.fn().mockResolvedValue({ invoke: invokeFn }),
+        getAgentConfig: undefined,
+      };
+      const resumeToolJob: Pick<Job<AgentResumeToolData, AgentJobResult>, "id" | "name" | "data"> = {
+        id: "t1/1700000000002",
+        name: "resumeTool",
+        data: {
+          agentId: "default",
+          threadId: "t1",
+          content: "Approved text",
+          commitOnly: true,
+        },
+      };
+      const worker = await createWorker(compiledGraph);
+      const result = await worker.processJob(mockJob(resumeToolJob));
+
+      expect(invokeFn).not.toHaveBeenCalled();
+      expect(result.messages?.length).toBe(2);
+      const last = result.messages?.[result.messages.length - 1];
+      expect(last?.type).toBe("ai");
+      expect((last as StoredAIMessage).data?.content).toBe("Approved text");
       expect(mockRedis.zadd).toHaveBeenCalled();
     });
 

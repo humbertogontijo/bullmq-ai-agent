@@ -9,7 +9,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { MessageRole, TodoItem, TodoItemsGraph, TodoSequenceSpec } from "bullmq-ai-agent";
-import { BullMQAgentClient, BullMQAgentWorker, isResumeRequired } from "bullmq-ai-agent";
+import { BullMQAgentClient, BullMQAgentWorker, getSuggestionContent, isResumeRequired, isSuggestion } from "bullmq-ai-agent";
 import type { ModelOptions } from "bullmq-ai-agent";
 import type { AgentJobResult, StoredAgentState, StoredMessage } from "bullmq-ai-agent";
 
@@ -93,7 +93,7 @@ export async function startWorkers(
 
 /** True if wait() result is the fallback (no_job or job_not_found). */
 function isFallbackResult(result: unknown): result is { status: "no_job" | "job_not_found"; message?: string } {
-  return typeof result === "object" && result !== null && "status" in result && ((result as { status: string }).status === "no_job" || (result as { status: string }).status === "job_not_found");
+  return typeof result === "object" && result !== null && "status" in result && (result.status === "no_job" || result.status === "job_not_found");
 }
 
 /** Get last AI message content as string from a chunk's messages. */
@@ -127,7 +127,7 @@ function getHumanPromptFromChunk(chunk: StoredAgentState): string {
   const messages = chunk?.messages ?? [];
   const last = messages[messages.length - 1];
   if (last?.type === "ai") {
-    const toolCalls = (last.data as { tool_calls?: Array<{ name: string; args?: { reason?: string } }> })?.tool_calls;
+    const toolCalls = last.data?.tool_calls;
     const hitl = Array.isArray(toolCalls) ? toolCalls.find((tc) => tc.name === "request_human_approval") : undefined;
     if (hitl?.args?.reason) return hitl.args.reason;
   }
@@ -294,7 +294,7 @@ async function flowMemory(client: BullMQAgentClient, modelOptions: { chatModelOp
     const runResult = await client.run(agentId, threadA, { messages, ttl: WAIT_TTL });
     const result = await runResult.promise;
     if (!isFallbackResult(result)) {
-      const reply = getLastMessageFromChunk(result as AgentJobResult);
+      const reply = getLastMessageFromChunk(result);
       if (reply) clack.note(reply, "Assistant (Thread A)");
     }
   } catch (err) {
@@ -317,7 +317,7 @@ async function flowMemory(client: BullMQAgentClient, modelOptions: { chatModelOp
     const runResult = await client.run(agentId, threadB, { messages, ttl: WAIT_TTL });
     const result = await runResult.promise;
     if (!isFallbackResult(result)) {
-      const reply = getLastMessageFromChunk(result as AgentJobResult);
+      const reply = getLastMessageFromChunk(result);
       if (reply) clack.note(reply, "Assistant (Thread B)");
     }
   } catch (err) {
@@ -369,6 +369,105 @@ async function flowTodos(client: BullMQAgentClient, modelOptions: { chatModelOpt
   }
 }
 
+async function flowSuggestMode(client: BullMQAgentClient, _modelOptions: { chatModelOptions: ModelOptions; embeddingModelOptions: ModelOptions }): Promise<void> {
+  clack.note(
+    "Suggest mode: the AI drafts a response but does not send it. You review and approve, edit, or write your own.\n" +
+    "Uses mode: \"suggest\" on run — the AI response is converted to a suggest_response tool call.\n" +
+    "Approve/edit via resumeTool. Or just send a new message to ignore the suggestion.",
+    "Suggest mode"
+  );
+
+  const threadId = `suggest-thread-${Date.now()}`;
+  const agentId = "default";
+
+  while (true) {
+    const input = orExit(
+      await clack.text({
+        message: "End-user message (the AI will draft a suggestion for you to review)",
+        placeholder: "e.g. What are your business hours?",
+      })
+    );
+    if (!input.trim()) continue;
+
+    const messages = toStoredMessages([{ role: "user", content: input }]);
+    const runResult = await client.run(agentId, threadId, { messages, ttl: WAIT_TTL, mode: "suggest" });
+    let result: AgentJobResult = await runResult.promise;
+
+    if (isFallbackResult(result)) {
+      clack.log.warn("Job could not be found.");
+      break;
+    }
+
+    // Handle any HITL tool calls before the suggestion
+    while (result && isResumeRequired(result) && !isSuggestion(result)) {
+      const prompt = getHumanPromptFromChunk(result);
+      const humanInput = orExit(
+        await clack.text({
+          message: `[Human-in-the-loop] ${prompt}`,
+          placeholder: "Your response...",
+        })
+      );
+      const resumeResult = await client.resumeTool(agentId, threadId, { content: humanInput, ttl: WAIT_TTL, mode: "suggest" });
+      result = await resumeResult.promise;
+      if (isFallbackResult(result)) break;
+    }
+
+    if (isSuggestion(result)) {
+      const suggestion = getSuggestionContent(result) ?? "(empty suggestion)";
+      clack.note(suggestion, "AI Suggestion");
+
+      const action = orExit(
+        await clack.select({
+          message: "What do you want to do with this suggestion?",
+          options: [
+            { value: "approve", label: "Approve", hint: "Send the suggestion as-is" },
+            { value: "edit", label: "Edit", hint: "Modify the suggestion before sending" },
+            { value: "rewrite", label: "Rewrite", hint: "Discard and write your own response" },
+            { value: "skip", label: "Skip", hint: "Ignore this suggestion (next message will cancel it)" },
+          ],
+        })
+      );
+
+      if (action === "skip") {
+        clack.log.message("Suggestion skipped. It will be cancelled when you send the next message.");
+      } else {
+        let finalContent = suggestion;
+        if (action === "edit") {
+          finalContent = orExit(
+            await clack.text({
+              message: "Edit the suggestion",
+              initialValue: suggestion,
+            })
+          );
+        } else if (action === "rewrite") {
+          finalContent = orExit(
+            await clack.text({
+              message: "Write your response",
+              placeholder: "Your response to the end-user...",
+            })
+          );
+        }
+        const resumeResult = await client.resumeTool(agentId, threadId, {
+          content: finalContent,
+          ttl: WAIT_TTL,
+          commitOnly: true,
+        });
+        const approved = await resumeResult.promise;
+        if (!isFallbackResult(approved)) {
+          const reply = getLastMessageFromChunk(approved);
+          if (reply) clack.note(reply, "Committed response");
+        }
+      }
+    } else {
+      const lastMessage = result ? getLastMessageFromChunk(result) : undefined;
+      if (lastMessage) clack.note(lastMessage, "Assistant (no suggestion — direct response)");
+    }
+
+    const again = orExit(await clack.confirm({ message: "Send another message?" }));
+    if (!again) break;
+  }
+}
+
 async function main(): Promise<void> {
   const scriptPath = fileURLToPath(import.meta.url);
   const isRunDirectly = process.argv[1] === scriptPath || process.argv[1]?.endsWith("cli.ts") || process.argv[1]?.endsWith("cli.js");
@@ -404,6 +503,7 @@ async function main(): Promise<void> {
           message: "What do you want to do?",
           options: [
             { value: "basic", label: "Basic chat", hint: "Free-form conversation" },
+            { value: "suggest", label: "Suggest mode", hint: "AI drafts a response; you approve, edit, or rewrite" },
             { value: "rag", label: "RAG", hint: "Ingest + ask questions with retrieve" },
             { value: "hitl", label: "Human-in-the-loop", hint: "Request approval then resume" },
             { value: "memory", label: "Memory", hint: "Cross-thread memory: remember facts across conversations" },
@@ -418,6 +518,9 @@ async function main(): Promise<void> {
       switch (choice) {
         case "basic":
           await flowBasicChat(client, modelOptions);
+          break;
+        case "suggest":
+          await flowSuggestMode(client, modelOptions);
           break;
         case "rag":
           await flowRag(client, modelOptions);

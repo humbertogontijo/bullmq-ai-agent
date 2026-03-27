@@ -12,7 +12,20 @@ import { snowflake } from "./utils/snowflake.js";
 import { createAgentQueue } from "./queues/agentQueue.js";
 import { createIngestQueue } from "./queues/ingestQueue.js";
 import { createSearchQueue } from "./queues/searchQueue.js";
-import type { AgentJobData, AgentJobResult, AgentResumeToolData, AgentRunData, IngestJobData, IngestJobResult, SearchJobData, SearchJobResult, StoredMessage } from "./queues/types.js";
+import type {
+  AgentClientJobBaseOptions,
+  AgentJobData,
+  AgentJobResult,
+  AgentResumeToolData,
+  AgentRunData,
+  IngestJobData,
+  IngestJobResult,
+  SearchJobData,
+  SearchJobResult,
+  StoredMessage,
+} from "./queues/types.js";
+
+export type { AgentClientJobBaseOptions, AgentJobBaseData } from "./queues/types.js";
 
 export type MessageRole = "user" | "assistant" | "system";
 
@@ -30,31 +43,27 @@ export interface AwaitableOptions {
 }
 
 /** Options for buildRunFlowChild: no waiting; used to build a flow child node. */
-export interface RunFlowChildOptions {
+export interface RunFlowChildOptions extends AgentClientJobBaseOptions {
   /** Initial messages (StoredMessage[], e.g. [{ type: "human", data: { content: "Hello" } }]). */
   messages: StoredMessage[];
-  /** Contact id (end-user identity). Scopes per-contact memories so personal data never leaks across users. Defaults to threadId when omitted. */
-  contactId?: string;
-  /** Subagent name; when set, that subagent runs directly (must match a subagent name from BullMQAgentWorker options). */
-  subagentId?: string;
-  /** Optional run-level metadata (e.g. owner, tenant). Passed to configurable so tools and getAgentConfig can read it. */
-  metadata?: Record<string, unknown>;
 }
 
 /** Options for run(); extends RunFlowChildOptions with await-specific options. */
 export interface RunOptions extends RunFlowChildOptions, AwaitableOptions {
 }
 
-/** Options for buildResumeToolFlowChild: no waiting; used to build a flow child node. */
-export interface ResumeToolFlowChildOptions {
-  /** Human response content for the request_human_approval tool. */
+/**
+ * Options for buildResumeToolFlowChild: no waiting; used to build a flow child node.
+ * Use the same `contactId` as the original run when contact-scoped memory applies.
+ */
+export interface ResumeToolFlowChildOptions extends AgentClientJobBaseOptions {
+  /** Human response content for the pending tool call (e.g. request_human_approval or suggest_response). */
   content: string;
-  /** Contact id (end-user identity). Must match the contactId used in the original run. Defaults to threadId when omitted. */
-  contactId?: string;
-  /** Pass when resuming so the same runnable (main or subagent) is used. */
-  subagentId?: string;
-  /** Optional run-level metadata. */
-  metadata?: Record<string, unknown>;
+  /**
+   * When true, persist `content` as the final assistant message and skip graph invocation.
+   * Typical for suggest mode (`commitOnly: true` with `content` as the approved/edited reply).
+   */
+  commitOnly?: boolean;
 }
 
 /** Options for resumeTool(); extends ResumeToolFlowChildOptions with await-specific options. */
@@ -275,6 +284,7 @@ export class BullMQAgentClient {
       contactId: options.contactId,
       subagentId: options.subagentId,
       metadata: options.metadata,
+      mode: options.mode,
     });
     const job = await this.agentQueue.add(spec.name, spec.data, spec.opts);
     const resolvedJobId = job.id ?? spec.opts?.jobId;
@@ -288,8 +298,9 @@ export class BullMQAgentClient {
   }
 
   /**
-   * Resume after human-in-the-loop by sending only the human response content. The worker fetches the last
-   * executed job for the thread, builds the tool message with the last AI message's tool_call_id, and runs the graph.
+   * Resume after a pending tool call by sending human response `content`. The worker loads the last job for the thread.
+   * By default it builds a tool message and runs the graph. With `commitOnly: true`, it persists `content` as the
+   * final assistant message and skips graph invocation (typical for suggest-mode approval).
    * Returns ClientResult<AgentJobResult>. Requires a previous run for this thread (job registered in thread-jobs set).
    */
   async resumeTool(
@@ -302,6 +313,8 @@ export class BullMQAgentClient {
       contactId: options.contactId,
       subagentId: options.subagentId,
       metadata: options.metadata,
+      mode: options.mode,
+      commitOnly: options.commitOnly,
     });
     const job = await this.agentQueue.add(spec.name, spec.data, spec.opts);
     const resolvedJobId = job.id ?? spec.opts?.jobId;
@@ -333,6 +346,7 @@ export class BullMQAgentClient {
         contactId: options.contactId,
         subagentId: options.subagentId,
         metadata: options.metadata,
+        mode: options.mode,
         input: { messages: options.messages },
       },
       opts: { jobId },
@@ -356,6 +370,8 @@ export class BullMQAgentClient {
         content: options.content,
         subagentId: options.subagentId,
         metadata: options.metadata,
+        mode: options.mode,
+        commitOnly: options.commitOnly,
       },
       opts: { jobId },
     };

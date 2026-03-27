@@ -3,6 +3,9 @@ import { GraphInterrupt } from "@langchain/langgraph";
 import { AgentState } from "../state.js";
 import { ESCALATE_TO_HUMAN_REASON_DESCRIPTION, ESCALATE_TO_HUMAN_TOOL_DESCRIPTION } from "../prompts.js";
 
+/** Tool name for {@link escalateToHuman}. */
+export const ESCALATE_TO_HUMAN_TOOL_NAME = "escalate_to_human";
+
 const schema = {
   type: "object" as const,
   properties: {
@@ -24,7 +27,7 @@ export const escalateToHuman = tool(
     throw new GraphInterrupt([{ value: runtime.state }]);
   },
   {
-    name: "escalate_to_human",
+    name: ESCALATE_TO_HUMAN_TOOL_NAME,
     description: ESCALATE_TO_HUMAN_TOOL_DESCRIPTION,
     schema,
   }

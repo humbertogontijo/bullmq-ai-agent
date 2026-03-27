@@ -3,6 +3,9 @@ import { GraphInterrupt } from "@langchain/langgraph";
 import { AgentState } from "../state.js";
 import { REQUEST_HUMAN_APPROVAL_REASON_DESCRIPTION, REQUEST_HUMAN_APPROVAL_TOOL_DESCRIPTION } from "../prompts.js";
 
+/** Tool name for {@link requestHumanInTheLoop}. */
+export const REQUEST_HUMAN_APPROVAL_TOOL_NAME = "request_human_approval";
+
 const schema = {
   type: "object" as const,
   properties: {
@@ -24,7 +27,7 @@ export const requestHumanInTheLoop = tool(
     throw new GraphInterrupt([{ value: runtime.state }]);
   },
   {
-    name: "request_human_approval",
+    name: REQUEST_HUMAN_APPROVAL_TOOL_NAME,
     description: REQUEST_HUMAN_APPROVAL_TOOL_DESCRIPTION,
     schema,
   }

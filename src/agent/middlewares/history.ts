@@ -89,7 +89,7 @@ export async function getThreadHistory(
 export function serializeAgentState(state: AgentState): StoredAgentState {
   if (state.__interrupt__ != null && Array.isArray(state.__interrupt__) && state.__interrupt__.length > 0) {
     const [first] = state.__interrupt__;
-    const value = first?.value as AgentState | undefined;
+    const value = first?.value;
     if (value) return serializeAgentState(value);
   }
   const messages = state.messages ?? [];
@@ -124,7 +124,7 @@ export function createHistoryMiddleware() {
     }),
     contextSchema: runContextContextSchema,
     beforeAgent: async (_state, runtime) => {
-      const ctx = runtime?.context as RunContext | undefined;
+      const ctx = runtime?.context;
       const { redis, thread_id, job, queueKeyPrefix } = ctx ?? {};
       if (!redis || !job?.id || !queueKeyPrefix || !thread_id) {
         return;
