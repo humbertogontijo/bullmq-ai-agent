@@ -204,6 +204,12 @@ export interface AgentJobBaseData {
   metadata?: Record<string, unknown>;
   /** When "suggest", the AI response is converted into a suggest_response tool call for human review. Use resumeTool to approve/edit. */
   mode?: "auto" | "suggest";
+  /**
+   * When true, skip the model and only update thread history in Redis.
+   * - **run:** store `input.messages` as this job's return value; todos carry forward from the previous job (or `[]`).
+   * - **resumeTool:** persist `content` as the final assistant message (after stripping the pending tool-call AI turn); typical for suggest approval.
+   */
+  persistOnly?: boolean;
 }
 
 /**
@@ -222,11 +228,6 @@ export interface AgentRunData extends AgentJobBaseData {
 export interface AgentResumeToolData extends AgentJobBaseData {
   /** Human response content for the pending tool call. */
   content: string;
-  /**
-   * When true, persist `content` as the final assistant message and skip graph invocation.
-   * Use for suggest mode approval or any flow where the human's text should be saved as-is without a model turn.
-   */
-  commitOnly?: boolean;
 }
 
 /** Agent queue job data (run or resumeTool). Discriminator is job name: "run" | "resumeTool". */

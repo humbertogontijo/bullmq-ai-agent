@@ -25,6 +25,12 @@ const RS = {
   VECTOR: "VECTOR",
 } as const;
 
+/** FT.SEARCH / FT.INFO when the index was never created (no ingest yet). */
+function isMissingRediSearchIndex(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /no such index/i.test(msg);
+}
+
 export interface RedisVectorStoreConfig {
   /** ioredis client (Redis or Cluster). Must support RediSearch (FT.*). */
   client: Redis | Cluster;
@@ -241,7 +247,13 @@ export class RedisVectorStore extends VectorStore {
       opts.LIMIT.size,
     ] as const;
 
-    const reply = await this.client.call(...args) as unknown[];
+    let reply: unknown[];
+    try {
+      reply = (await this.client.call(...args)) as unknown[];
+    } catch (err) {
+      if (isMissingRediSearchIndex(err)) return [];
+      throw err;
+    }
     const total = reply[0] as number;
     const results: [Document, number][] = [];
 

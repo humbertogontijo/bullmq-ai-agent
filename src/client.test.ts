@@ -121,6 +121,23 @@ describe("BullMQAgentClient", () => {
         expect.objectContaining({ jobId: expect.stringMatching(/^thread-1\/\d+$/) })
       );
     });
+
+    it("passes persistOnly on run job data", async () => {
+      mockAdd.mockResolvedValue({ id: "job-persist" });
+      const msg: StoredHumanMessage = {
+        type: "human",
+        data: { content: "Outbound from human agent", name: "agent" },
+      };
+      await client.run("default", "thread-1", { messages: [msg], persistOnly: true });
+      expect(mockAdd).toHaveBeenCalledWith(
+        "run",
+        expect.objectContaining({
+          persistOnly: true,
+          input: { messages: [msg] },
+        }),
+        expect.any(Object)
+      );
+    });
   });
 
   describe("run (awaitable ClientResult)", () => {

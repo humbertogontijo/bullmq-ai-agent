@@ -124,6 +124,68 @@ describe("AgentWorker.processJob", () => {
     });
   });
 
+  describe("persistOnly run", () => {
+    it("skips graph invoke and stores input messages; carries todos from previous job", async () => {
+      const lastJobReturnValue = JSON.stringify({
+        messages: [{ type: "human", data: { content: "Hi", name: undefined, tool_call_id: undefined } }],
+      });
+      vi.mocked(mockRedis.eval).mockResolvedValue(["t1/1700000000001", lastJobReturnValue]);
+
+      const invokeFn = vi.fn();
+      const compiledGraph = {
+        getRunnable: vi.fn().mockResolvedValue({ invoke: invokeFn }),
+        getAgentConfig: undefined,
+      };
+      const agentMessage = {
+        type: "human" as const,
+        data: { content: "Agent says: your order ships tomorrow.", name: "agent", tool_call_id: undefined },
+      };
+      const persistJob: Pick<Job<AgentRunData, AgentJobResult>, "id" | "name" | "data"> = {
+        id: "t1/1700000000002",
+        name: "run",
+        data: {
+          agentId: "default",
+          threadId: "t1",
+          persistOnly: true,
+          input: { messages: [agentMessage] },
+        },
+      };
+      const worker = await createWorker(compiledGraph);
+      const result = await worker.processJob(mockJob(persistJob));
+
+      expect(invokeFn).not.toHaveBeenCalled();
+      expect(result.messages).toEqual([agentMessage]);
+      expect(mockRedis.zadd).toHaveBeenCalled();
+    });
+
+    it("works with no previous job (empty todos)", async () => {
+      vi.mocked(mockRedis.eval).mockResolvedValue([]);
+      const invokeFn = vi.fn();
+      const compiledGraph = {
+        getRunnable: vi.fn().mockResolvedValue({ invoke: invokeFn }),
+        getAgentConfig: undefined,
+      };
+      const persistJob: Pick<Job<AgentRunData, AgentJobResult>, "id" | "name" | "data"> = {
+        id: "t1/1700000000003",
+        name: "run",
+        data: {
+          agentId: "default",
+          threadId: "t1",
+          persistOnly: true,
+          input: {
+            messages: [{ type: "human", data: { content: "Note", name: "agent", tool_call_id: undefined } }],
+          },
+        },
+      };
+      const worker = await createWorker(compiledGraph);
+      const result = await worker.processJob(mockJob(persistJob));
+
+      expect(invokeFn).not.toHaveBeenCalled();
+      expect(result.messages?.length).toBe(1);
+      expect(mockRedis.zadd).toHaveBeenCalled();
+    });
+  });
+
   describe("resume job (multiple input messages)", () => {
     it("returns serialized state when graph returns __interrupt__", async () => {
       const runJobMultipleMessages: Pick<Job<AgentRunData, AgentJobResult>, "id" | "name" | "data"> = {
@@ -233,7 +295,7 @@ describe("AgentWorker.processJob", () => {
       expect(mockRedis.zadd).toHaveBeenCalled();
     });
 
-    it("commitOnly skips graph invoke and persists content as final AI message", async () => {
+    it("persistOnly on resume skips graph invoke and persists content as final AI message", async () => {
       const lastJobMessages = [
         { type: "human", data: { content: "Hello", name: undefined, tool_call_id: undefined } },
         {
@@ -259,14 +321,14 @@ describe("AgentWorker.processJob", () => {
           agentId: "default",
           threadId: "t1",
           content: "Approved text",
-          commitOnly: true,
+          persistOnly: true,
         },
       };
       const worker = await createWorker(compiledGraph);
       const result = await worker.processJob(mockJob(resumeToolJob));
 
       expect(invokeFn).not.toHaveBeenCalled();
-      expect(result.messages?.length).toBe(2);
+      expect(result.messages?.length).toBe(1);
       const last = result.messages?.[result.messages.length - 1];
       expect(last?.type).toBe("ai");
       expect((last as StoredAIMessage).data?.content).toBe("Approved text");

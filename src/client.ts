@@ -59,11 +59,6 @@ export interface RunOptions extends RunFlowChildOptions, AwaitableOptions {
 export interface ResumeToolFlowChildOptions extends AgentClientJobBaseOptions {
   /** Human response content for the pending tool call (e.g. request_human_approval or suggest_response). */
   content: string;
-  /**
-   * When true, persist `content` as the final assistant message and skip graph invocation.
-   * Typical for suggest mode (`commitOnly: true` with `content` as the approved/edited reply).
-   */
-  commitOnly?: boolean;
 }
 
 /** Options for resumeTool(); extends ResumeToolFlowChildOptions with await-specific options. */
@@ -285,6 +280,7 @@ export class BullMQAgentClient {
       subagentId: options.subagentId,
       metadata: options.metadata,
       mode: options.mode,
+      persistOnly: options.persistOnly,
     });
     const job = await this.agentQueue.add(spec.name, spec.data, spec.opts);
     const resolvedJobId = job.id ?? spec.opts?.jobId;
@@ -299,7 +295,7 @@ export class BullMQAgentClient {
 
   /**
    * Resume after a pending tool call by sending human response `content`. The worker loads the last job for the thread.
-   * By default it builds a tool message and runs the graph. With `commitOnly: true`, it persists `content` as the
+   * By default it builds a tool message and runs the graph. With `persistOnly: true`, it persists `content` as the
    * final assistant message and skips graph invocation (typical for suggest-mode approval).
    * Returns ClientResult<AgentJobResult>. Requires a previous run for this thread (job registered in thread-jobs set).
    */
@@ -314,7 +310,7 @@ export class BullMQAgentClient {
       subagentId: options.subagentId,
       metadata: options.metadata,
       mode: options.mode,
-      commitOnly: options.commitOnly,
+      persistOnly: options.persistOnly,
     });
     const job = await this.agentQueue.add(spec.name, spec.data, spec.opts);
     const resolvedJobId = job.id ?? spec.opts?.jobId;
@@ -347,6 +343,7 @@ export class BullMQAgentClient {
         subagentId: options.subagentId,
         metadata: options.metadata,
         mode: options.mode,
+        persistOnly: options.persistOnly,
         input: { messages: options.messages },
       },
       opts: { jobId },
@@ -371,7 +368,7 @@ export class BullMQAgentClient {
         subagentId: options.subagentId,
         metadata: options.metadata,
         mode: options.mode,
-        commitOnly: options.commitOnly,
+        persistOnly: options.persistOnly,
       },
       opts: { jobId },
     };

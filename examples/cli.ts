@@ -450,7 +450,7 @@ async function flowSuggestMode(client: BullMQAgentClient, _modelOptions: { chatM
         const resumeResult = await client.resumeTool(agentId, threadId, {
           content: finalContent,
           ttl: WAIT_TTL,
-          commitOnly: true,
+          persistOnly: true,
         });
         const approved = await resumeResult.promise;
         if (!isFallbackResult(approved)) {

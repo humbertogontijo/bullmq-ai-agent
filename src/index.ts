@@ -76,7 +76,6 @@ export {
   resolveTodos,
 } from "./queues/types.js";
 export {
-  buildCommitOnlyResumeResult,
   convertToSuggestion,
   suggestion,
   SUGGEST_RESPONSE_TOOL_NAME,

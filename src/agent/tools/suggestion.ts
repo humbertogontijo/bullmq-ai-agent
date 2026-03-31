@@ -66,31 +66,3 @@ export function convertToSuggestion(result: AgentJobResult): AgentJobResult {
   messages[lastIdx] = suggestionMessage;
   return { ...result, messages };
 }
-
-/**
- * Persist a resume without invoking the graph: remove the last AI message that still has pending
- * `tool_calls`, then append a plain AI message with `approvedContent`. Works for any pending tool
- * (e.g. suggest_response, request_human_approval) when {@link AgentResumeToolData.commitOnly} is true.
- */
-export function buildCommitOnlyResumeResult(
-  lastState: AgentJobResult,
-  approvedContent: string,
-): AgentJobResult {
-  const messages = [...lastState.messages];
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m?.type === "ai") {
-      const toolCalls = m.data?.tool_calls;
-      if (toolCalls?.length) {
-        messages.splice(i, 1);
-        break;
-      }
-    }
-  }
-  const approvedMessage: StoredAIMessage = {
-    type: "ai",
-    data: { content: approvedContent },
-  };
-  messages.push(approvedMessage);
-  return { messages, todos: lastState.todos };
-}

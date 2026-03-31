@@ -2,10 +2,11 @@ import { SystemMessage } from "@langchain/core/messages";
 import { Job, Worker, WorkerOptions } from "bullmq";
 import type { CompiledGraph } from "../agent/compile.js";
 import { parseTimestampFromJobId, serializeAgentState } from "../agent/middlewares/history.js";
-import { buildCommitOnlyResumeResult, convertToSuggestion } from "../agent/tools/suggestion.js";
+import { AgentState } from "../agent/state.js";
+import { convertToSuggestion } from "../agent/tools/suggestion.js";
 import { getLastJobAndReturnvalueScript } from "../commands/index.js";
-import type { AgentWorkerLogger, GetTodosCallback, ModelOptions, RedisLike } from "../options.js";
 import type { AgentMemoryStore } from "../memory/AgentMemoryStore.js";
+import type { AgentWorkerLogger, GetTodosCallback, ModelOptions, RedisLike } from "../options.js";
 import { buildRunContext, QUEUE_NAMES } from "../options.js";
 import { buildJobIdPrefix, buildThreadJobsKey } from "../queues/queueKeys.js";
 import type {
@@ -14,11 +15,10 @@ import type {
   AgentResumeToolData,
   AgentRunData,
   StoredAgentState,
-  StoredToolMessage,
+  StoredToolMessage
 } from "../queues/types.js";
 import { getLastRequestHumanApprovalToolCall } from "../utils/message.js";
 import { mapStoredMessagesToChatMessages } from "../utils/messageMapping.js";
-import { AgentState } from "../agent/state.js";
 
 export interface AgentWorkerParams {
   compiledGraph: CompiledGraph;
@@ -113,6 +113,18 @@ export class AgentWorker {
     let inputStored: StoredAgentState["messages"];
     if (job.name === "resumeTool") {
       const resumeData = data as AgentResumeToolData;
+
+      if (resumeData.persistOnly) {
+        await this.registerThreadJob(job, data.threadId, data.subagentId);
+        return {
+          messages: [{
+            type: "ai",
+            data: resumeData,
+          }
+          ]
+        }
+      }
+
       const threadJobsKey = buildThreadJobsKey(this.queueKeyPrefix, QUEUE_NAMES.AGENT, threadId);
       const jobIdPrefix = buildJobIdPrefix(this.queueKeyPrefix, QUEUE_NAMES.AGENT);
       const raw = (await this.redis.eval(
@@ -137,10 +149,6 @@ export class AgentWorker {
         throw new Error(`Last job for thread ${threadId} has no pending tool calls.`);
       }
 
-      if (resumeData.commitOnly) {
-        return this.commitOnlyResume(job, threadId, data, lastState, resumeData.content);
-      }
-
       const toolMessage: StoredToolMessage = {
         type: "tool",
         data: {
@@ -152,6 +160,12 @@ export class AgentWorker {
       inputStored = [toolMessage];
     } else {
       const runData = data as AgentRunData;
+      if (runData.persistOnly) {
+        await this.registerThreadJob(job, data.threadId, data.subagentId);
+        return {
+          messages: runData.input?.messages ?? [],
+        };
+      }
       inputStored = runData.input?.messages ?? [];
     }
 
@@ -182,40 +196,26 @@ export class AgentWorker {
       result = convertToSuggestion(result);
     }
 
-    // Register this job in the thread-jobs set so resumeTool and history can use it. Skip for ephemeral subagents.
-    const isEphemeral = data.subagentId && this.compiledGraph.isEphemeralSubagent?.(data.subagentId);
-    if (!isEphemeral) {
-      const threadJobsKey = buildThreadJobsKey(this.queueKeyPrefix, QUEUE_NAMES.AGENT, threadId);
-      const ts = parseTimestampFromJobId(String(job.id));
-      const score = Number.isNaN(ts) ? Date.now() : ts;
-      await this.redis.zadd(threadJobsKey, score, String(job.id));
-    }
+    await this.registerThreadJob(job, threadId, data.subagentId);
 
     return result;
   }
 
   /**
-   * Persist resume content as the final assistant message without invoking the graph
-   * ({@link AgentResumeToolData.commitOnly}).
+   * Register this job in the thread-jobs ZSET so resumeTool and history can use it.
+   * No-op for ephemeral subagents.
    */
-  private async commitOnlyResume(
+  private async registerThreadJob(
     job: Job<AgentJobData, AgentJobResult>,
     threadId: string,
-    data: AgentJobData,
-    lastState: AgentJobResult,
-    approvedContent: string,
-  ): Promise<AgentJobResult> {
-    const result = buildCommitOnlyResumeResult(lastState, approvedContent);
-
-    const isEphemeral = data.subagentId && this.compiledGraph.isEphemeralSubagent?.(data.subagentId);
-    if (!isEphemeral) {
-      const threadJobsKey = buildThreadJobsKey(this.queueKeyPrefix, QUEUE_NAMES.AGENT, threadId);
-      const ts = parseTimestampFromJobId(String(job.id));
-      const score = Number.isNaN(ts) ? Date.now() : ts;
-      await this.redis.zadd(threadJobsKey, score, String(job.id));
-    }
-
-    return result;
+    subagentId: string | undefined,
+  ): Promise<void> {
+    const isEphemeral = subagentId && this.compiledGraph.isEphemeralSubagent?.(subagentId);
+    if (isEphemeral) return;
+    const threadJobsKey = buildThreadJobsKey(this.queueKeyPrefix, QUEUE_NAMES.AGENT, threadId);
+    const ts = parseTimestampFromJobId(String(job.id));
+    const score = Number.isNaN(ts) ? Date.now() : ts;
+    await this.redis.zadd(threadJobsKey, score, String(job.id));
   }
 
   start() {
